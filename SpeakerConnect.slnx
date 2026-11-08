@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="SpeakerConnect/SpeakerConnect.csproj" />
+  <Project Path="SpeakerConnect.Diagnostics/SpeakerConnect.Diagnostics.csproj" />
+</Solution>
