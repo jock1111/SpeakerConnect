@@ -4,9 +4,33 @@ Play Windows audio through **up to 5 wired, Bluetooth, or USB speakers simultane
 
 Speaker Connect captures the WASAPI loopback mix of one selected playback endpoint (the *source*) and renders synchronized copies to up to four additional endpoints. The original source keeps playing normally through Windows, so you get one stream heard on every speaker in the room.
 
-![Speaker Connect main window](assets/speaker-connect-maximized.png)
+![Speaker Connect main window](assets/speaker-connect-main.png)
 
-*Main window: source selection, up to four additional outputs, per-device volume/delay, master volume, synchronization calibration, and Smart Volume Balance.*
+*Main window: header with routing controls, loopback source card, additional-outputs device list, master volume, synchronization calibration, Smart Volume Balance, and a limitations reference.*
+
+### Device selection and outputs
+
+![Device selection and outputs](assets/speaker-connect-devices.png)
+
+*The "Additional outputs" card lists every render endpoint with a checkbox, per-device volume trim, delay control, and reference-speaker button. Up to four destinations can be checked (five audible endpoints including the source).*
+
+### Master volume and transport
+
+![Master volume and transport controls](assets/speaker-connect-volume.png)
+
+*Start/Stop routing buttons sit above the group master-volume slider and mute button. Windows keyboard keys and the taskbar slider drive the same logical volume.*
+
+### Synchronization calibration
+
+![Synchronization calibration](assets/speaker-connect-sync-calibration.png)
+
+*The calibration expander plays a short burst through each selected destination, one at a time, so you can align them by ear with the per-device delay controls. Saved offsets persist between sessions.*
+
+### Smart Volume Balance
+
+![Smart Volume Balance](assets/speaker-connect-volume-balance.png)
+
+*The balance expander shows the enable checkbox, a per-speaker attenuation slider for every endpoint (source and outputs), live status, the source-endpoint limitation note, and the Calibrate / Reset / Save buttons.*
 
 ## Features
 
