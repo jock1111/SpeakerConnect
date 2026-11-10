@@ -3,619 +3,139 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:vm="clr-namespace:SpeakerConnect.ViewModels"
+        xmlns:views="clr-namespace:SpeakerConnect.Views"
         mc:Ignorable="d"
         Title="Speaker Connect"
-        Height="900"
-        Width="1080"
-        MinHeight="680"
-        MinWidth="900"
+        Height="800"
+        Width="1280"
+        MinHeight="660"
+        MinWidth="1020"
         WindowStartupLocation="CenterScreen"
-        Background="#F3F5F7">
-    <Window.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
-        <vm:MuteTextConverter x:Key="MuteTextConverter" />
+        FontFamily="Segoe UI Variable Text, Segoe UI"
+        FontSize="13"
+        Background="{DynamicResource PageBackgroundBrush}">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="220" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
 
-        <Style TargetType="Button">
-            <Setter Property="Padding" Value="16,8" />
-            <Setter Property="Margin" Value="8,0,0,0" />
-            <Setter Property="MinWidth" Value="96" />
-        </Style>
-
-        <Style TargetType="Border" x:Key="CardBorder">
-            <Setter Property="Background" Value="White" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="16" />
-            <Setter Property="BorderBrush" Value="#E1E5E9" />
-            <Setter Property="BorderThickness" Value="1" />
-        </Style>
-    </Window.Resources>
-
-    <Grid Margin="20">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
-
-        <!-- Header -->
-        <Grid Grid.Row="0" Margin="0,0,0,14">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-
-            <StackPanel>
-                <TextBlock Text="Speaker Connect"
-                           FontSize="26"
-                           FontWeight="SemiBold"
-                           Foreground="#1E2933" />
-                <TextBlock Text="Mirror Windows system audio from one playback endpoint to up to four additional outputs (five speakers total)."
-                           FontSize="13"
-                           Foreground="#5A6873"
-                           Margin="0,3,0,0" />
-            </StackPanel>
-
-            <Button Grid.Column="1"
-                    Content="Refresh devices"
-                    Command="{Binding RefreshCommand}"
-                    IsEnabled="{Binding IsConfigurationEnabled}"
-                    VerticalAlignment="Top" />
-        </Grid>
-
-        <!-- Source -->
-        <Border Grid.Row="1"
-                Style="{StaticResource CardBorder}"
-                Margin="0,0,0,14">
+        <!-- ======================= Sidebar ======================= -->
+        <Border Grid.Column="0"
+                Background="{DynamicResource NavBackgroundBrush}"
+                BorderBrush="{DynamicResource SeparatorBrush}"
+                BorderThickness="0,0,1,0">
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="360" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <StackPanel Grid.Column="0" Grid.Row="0" Margin="0,0,16,0">
-                    <TextBlock Text="Loopback source"
+                <!-- Title -->
+                <StackPanel Grid.Row="0" Margin="20,22,20,18">
+                    <TextBlock Text="Speaker Connect"
+                               FontSize="18"
                                FontWeight="SemiBold"
-                               Foreground="#26343E" />
-                    <TextBlock Text="This endpoint keeps playing natively."
+                               Foreground="{DynamicResource TextPrimaryBrush}" />
+                    <TextBlock Text="Multi-speaker audio router"
                                FontSize="12"
-                               Foreground="#6B7882"
-                               Margin="0,3,0,0" />
+                               Foreground="{DynamicResource TextTertiaryBrush}"
+                               Margin="0,2,0,0" />
                 </StackPanel>
 
-                <ComboBox Grid.Column="1"
-                          Grid.Row="0"
-                          ItemsSource="{Binding Devices}"
-                          SelectedItem="{Binding SourceDevice, Mode=TwoWay}"
-                          DisplayMemberPath="DisplayName"
-                          IsEnabled="{Binding IsConfigurationEnabled}"
-                          Padding="8,6"
-                          VerticalAlignment="Center" />
+                <!-- Navigation -->
+                <ListBox Grid.Row="1"
+                         Style="{StaticResource NavListBox}"
+                         ItemContainerStyle="{StaticResource NavListBoxItem}"
+                         ItemsSource="{Binding Pages}"
+                         SelectedValuePath="Page"
+                         SelectedValue="{Binding CurrentPage, Mode=TwoWay}">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Glyph}"
+                                           FontFamily="Segoe MDL2 Assets"
+                                           FontSize="15"
+                                           Foreground="{DynamicResource TextSecondaryBrush}"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding Title}"
+                                           FontSize="14"
+                                           Foreground="{DynamicResource TextPrimaryBrush}"
+                                           Margin="12,0,0,0"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
 
-                <StackPanel Grid.Column="2" Grid.Row="0" Margin="18,0,0,0" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding SourceSummary}"
-                               FontSize="12"
-                               Foreground="#41515C" />
-                    <TextBlock Text="WASAPI loopback records the mix sent to this device. The application cannot redirect individual apps to a different endpoint while using loopback alone."
-                               FontSize="11"
-                               Foreground="#7A8790"
-                               TextWrapping="Wrap"
-                               Margin="0,3,0,0" />
-                </StackPanel>
-
-                <StackPanel Grid.Column="1" Grid.Row="1"
-                            Orientation="Horizontal"
-                            Margin="0,14,0,0"
-                            VerticalAlignment="Center">
-                    <TextBlock Text="Latency profile"
-                               FontSize="12"
-                               Foreground="#5A6873"
-                               VerticalAlignment="Center"
-                               Margin="0,0,10,0" />
-                    <ComboBox Width="150"
-                              ItemsSource="{Binding BufferProfiles}"
-                              SelectedItem="{Binding SelectedBufferProfile, Mode=TwoWay}"
-                              DisplayMemberPath="DisplayName"
-                              IsEnabled="{Binding IsConfigurationEnabled}"
-                              VerticalAlignment="Center" />
-                    <Button Content="Use Bluetooth as source"
-                            Command="{Binding UseBluetoothSourceCommand}"
-                            VerticalAlignment="Center"
-                            ToolTip="Preselects the Bluetooth-style endpoint as the loopback source (name-based hint)" />
-                </StackPanel>
-
-                <TextBlock Grid.Column="2" Grid.Row="1"
-                           Text="{Binding BufferProfileSummary}"
-                           FontSize="11"
-                           Foreground="#7A8790"
-                           TextWrapping="Wrap"
-                           Margin="18,14,0,0"
-                           VerticalAlignment="Center" />
-            </Grid>
-        </Border>
-
-        <!-- Outputs header -->
-        <Grid Grid.Row="2" Margin="2,0,2,6">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-
-            <TextBlock Text="Additional outputs"
-                       FontSize="15"
-                       FontWeight="SemiBold"
-                       Foreground="#26343E"
-                       VerticalAlignment="Center" />
-            <TextBlock Grid.Column="1"
-                       Text="{Binding SelectionSummary}"
-                       FontSize="12"
-                       Foreground="#5A6873"
-                       VerticalAlignment="Center" />
-        </Grid>
-
-        <!-- Device list -->
-        <ScrollViewer Grid.Row="3"
-                      VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled">
-            <ItemsControl ItemsSource="{Binding Devices}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Border Style="{StaticResource CardBorder}"
-                                Margin="0,0,0,8"
-                                Padding="14">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="34" />
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="220" />
-                                    <ColumnDefinition Width="220" />
-                                </Grid.ColumnDefinitions>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                </Grid.RowDefinitions>
-
-                                <CheckBox Grid.Column="0"
-                                          Grid.RowSpan="2"
-                                          VerticalAlignment="Top"
-                                          Margin="0,3,0,0"
-                                          IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                          IsEnabled="{Binding CanSelect}"
-                                          ToolTip="Route a copy of the loopback audio to this device" />
-
-                                <StackPanel Grid.Column="1" Grid.Row="0" Margin="0,0,14,0">
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="{Binding DisplayName}"
-                                                   FontSize="14"
-                                                   FontWeight="SemiBold"
-                                                   Foreground="#26343E"
-                                                   TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Text="{Binding SelectedLabel}"
-                                                   FontSize="11"
-                                                   Foreground="#2E7D5B"
-                                                   Margin="10,2,0,0" />
-                                    </StackPanel>
-                                    <TextBlock Text="{Binding Details}"
-                                               FontSize="11"
-                                               Foreground="#6B7882"
-                                               Margin="0,3,0,0" />
-                                    <TextBlock Text="{Binding RoleLabel}"
-                                               FontSize="11"
-                                               Foreground="#2F6F8F"
-                                               Margin="0,3,0,0" />
-                                    <TextBlock Text="{Binding RuntimeStatus}"
-                                               FontSize="11"
-                                               Foreground="#7A8790"
-                                               TextTrimming="CharacterEllipsis"
-                                               Margin="0,3,0,0" />
-                                    <TextBlock Text="{Binding SoftwareStatusLine}"
-                                               FontSize="11"
-                                               Foreground="#2F6F8F"
-                                               TextWrapping="Wrap"
-                                               Margin="0,3,0,0"
-                                               Visibility="{Binding HasSoftwareStatus, Converter={StaticResource BoolToVisibility}}" />
-                                    <TextBlock Text="{Binding SyncMeasurementText}"
-                                               FontSize="11"
-                                               Foreground="#6B4F1D"
-                                               TextWrapping="Wrap"
-                                               Margin="0,3,0,0"
-                                               Visibility="{Binding HasSyncMeasurement, Converter={StaticResource BoolToVisibility}}" />
-                                    <Button Grid.RowSpan="2"
-                                            Content="Ref"
-                                            Command="{Binding DataContext.SetReferenceCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
-                                            CommandParameter="{Binding}"
-                                            IsEnabled="{Binding IsControlEnabled}"
-                                            ToolTip="Set as sync reference for calibration"
-                                            Width="32"
-                                            Margin="8,0,0,0"
-                                            VerticalAlignment="Center" />
-                                </StackPanel>
-
-                                <StackPanel Grid.Column="2" Grid.Row="0" Margin="0,0,20,0">
-                                    <Grid>
-                                        <TextBlock Text="Volume"
-                                                   FontSize="11"
-                                                   Foreground="#5A6873" />
-                                        <TextBlock Text="{Binding VolumeText}"
-                                                   FontSize="11"
-                                                   Foreground="#5A6873"
-                                                   HorizontalAlignment="Right" />
-                                    </Grid>
-                                    <Slider Minimum="0"
-                                            Maximum="100"
-                                            TickFrequency="5"
-                                            SmallChange="1"
-                                            LargeChange="10"
-                                            Value="{Binding Volume, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                            IsEnabled="{Binding IsControlEnabled}"
-                                            Margin="0,2,0,0" />
-                                </StackPanel>
-
-                                <StackPanel Grid.Column="3" Grid.Row="0">
-                                    <Grid>
-                                        <TextBlock Text="Delay"
-                                                   FontSize="11"
-                                                   Foreground="#5A6873" />
-                                        <TextBlock Text="{Binding DelayText}"
-                                                   FontSize="11"
-                                                   Foreground="#5A6873"
-                                                   HorizontalAlignment="Right" />
-                                    </Grid>
-                                    <Slider Minimum="0"
-                                            Maximum="2000"
-                                            TickFrequency="10"
-                                            SmallChange="5"
-                                            LargeChange="50"
-                                            Value="{Binding DelayMilliseconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                            IsEnabled="{Binding CanAdjustDelay}"
-                                            Margin="0,2,0,0" />
-                                </StackPanel>
-                            </Grid>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </ScrollViewer>
-
-        <!-- Commands and status -->
-        <Border Grid.Row="4"
-                Style="{StaticResource CardBorder}"
-                Margin="0,12,0,0">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-
-                <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding StatusMessage}"
-                               FontSize="13"
-                               Foreground="#26343E"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{Binding ErrorMessage}"
-                               FontSize="12"
-                               Foreground="#B42318"
-                               TextWrapping="Wrap"
-                               Margin="0,4,0,0"
-                               Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}" />
-                    <TextBlock Text="{Binding SyncDiagnosticsSummary}"
-                               FontSize="11"
-                               Foreground="#2F6F8F"
-                               TextWrapping="Wrap"
-                               Margin="0,4,0,0"
-                               Visibility="{Binding IsRunning, Converter={StaticResource BoolToVisibility}}" />
-                </StackPanel>
-
-                <StackPanel Grid.Column="1"
-                            Orientation="Horizontal"
-                            VerticalAlignment="Center">
-                    <Button Content="Start routing"
-                            Command="{Binding StartCommand}"
-                            IsDefault="True" />
-                    <Button Content="Stop"
-                            Command="{Binding StopCommand}" />
-                    <TextBlock Text="Master volume"
-                               FontSize="11"
-                               Foreground="#5A6873"
-                               VerticalAlignment="Center"
-                               Margin="16,0,8,0" />
-                    <Slider Minimum="0"
-                            Maximum="100"
-                            TickFrequency="10"
-                            SmallChange="1"
-                            LargeChange="10"
-                            Value="{Binding MasterVolume, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                            IsEnabled="{Binding IsRunning}"
-                            Width="120"
-                            VerticalAlignment="Center" />
-                    <ToggleButton Content="{Binding MasterMute, Converter={StaticResource MuteTextConverter}}"
-                                  IsChecked="{Binding MasterMute, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                  IsEnabled="{Binding IsRunning}"
-                                  Width="64"
-                                  Margin="8,0,0,0"
-                                  VerticalAlignment="Center"
-                                  ToolTip="Mute all routed speakers" />
-                </StackPanel>
-            </Grid>
-        </Border>
-
-        <!-- Synchronization: Auto Sync measurement plus a live manual test -->
-        <Expander Grid.Row="5" Margin="2,12,2,0" IsExpanded="False">
-            <Expander.Header>
-                <TextBlock Text="Synchronization (Auto Sync + live manual test)"
-                           FontSize="12"
-                           FontWeight="SemiBold"
-                           Foreground="#41515C" />
-            </Expander.Header>
-            <Border Style="{StaticResource CardBorder}" Margin="0,6,0,0">
-                <StackPanel>
-                    <TextBlock TextWrapping="Wrap"
-                               FontSize="12"
-                               Foreground="#26343E"
-                               Text="{Binding SyncStatus}" />
-
-                    <TextBlock TextWrapping="Wrap"
-                               FontSize="11"
-                               Foreground="#41515C"
-                               Margin="0,6,0,0"
-                               Text="{Binding SyncDetail}"
-                               Visibility="{Binding HasSyncDetail, Converter={StaticResource BoolToVisibility}}" />
-
-                    <Grid Margin="0,10,0,0">
+                <!-- Footer: status + theme -->
+                <StackPanel Grid.Row="2" Margin="16,0,16,16">
+                    <Border Background="{DynamicResource SeparatorBrush}" Height="1" Margin="4,0,4,14" />
+                    <Grid Margin="4,0,4,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
-                            <ColumnDefinition Width="260" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-
-                        <TextBlock Text="Manual reference"
-                                   FontSize="11"
-                                   Foreground="#5A6873"
-                                   VerticalAlignment="Center"
-                                   Margin="0,0,10,0" />
-
-                        <ComboBox Grid.Column="1"
-                                  ItemsSource="{Binding SyncReferenceCandidates}"
-                                  SelectedItem="{Binding ReferenceDevice, Mode=TwoWay}"
-                                  DisplayMemberPath="DisplayName"
-                                  IsEnabled="{Binding IsSyncControlsEnabled}"
-                                  Padding="8,6"
-                                  VerticalAlignment="Center"
-                                  ToolTip="Speaker used as the audible comparison point during the manual test" />
-
-                        <TextBlock Grid.Column="2"
-                                   Text="{Binding ReferenceSummary}"
-                                   FontSize="11"
-                                   Foreground="#7A8790"
-                                   TextWrapping="Wrap"
-                                   Margin="18,0,0,0"
+                        <Ellipse Width="8" Height="8" VerticalAlignment="Center"
+                                 Fill="{Binding IsRunning, Converter={StaticResource RunningToBrush}}" />
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding IsRunning, Converter={StaticResource RunningStateText}}"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                   Margin="8,0,0,0"
                                    VerticalAlignment="Center" />
                     </Grid>
-
-                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                        <Button Content="Auto Sync"
-                                Command="{Binding AutoSyncCommand}"
-                                ToolTip="Measures every routed destination and the source with a microphone chirp, then applies and saves delays. Routing must be running." />
-                        <Button Content="Manual Sync"
-                                Command="{Binding ManualSyncCommand}"
-                                ToolTip="Plays a burst train through the real loopback/delay path so you can align speakers by ear. Delay sliders stay live during the test." />
-                        <Button Content="Cancel"
-                                Command="{Binding CancelSyncCommand}"
-                                ToolTip="Cancels Auto Sync or the manual test without applying a partial result" />
-                        <Button Content="Reset Sync"
-                                Command="{Binding ResetSyncCommand}"
-                                ToolTip="Clears every configured delay and saved acoustic timing result" />
-                        <Button Content="Save Calibration"
-                                Command="{Binding SaveSyncCommand}"
-                                ToolTip="Persists the current delays and any acoustic measurement metadata by endpoint id" />
-                    </StackPanel>
-
-                    <ItemsControl ItemsSource="{Binding Devices}" Margin="0,10,0,0">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Margin="0,2">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="210" />
-                                        <ColumnDefinition Width="90" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-
-                                    <TextBlock Text="{Binding DisplayName}"
-                                               FontSize="12"
-                                               Foreground="#26343E"
-                                               TextTrimming="CharacterEllipsis"
-                                               VerticalAlignment="Top" />
-
-                                    <TextBlock Grid.Column="1"
-                                               Text="{Binding DelayText}"
-                                               FontSize="11"
-                                               Foreground="#5A6873"
-                                               VerticalAlignment="Top" />
-
-                                    <TextBlock Grid.Column="2"
-                                               Text="{Binding SyncMeasurementDisplay}"
-                                               FontSize="11"
-                                               Foreground="#41515C"
-                                               TextWrapping="Wrap"
-                                               VerticalAlignment="Top" />
-                                </Grid>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-
-                    <TextBlock Text="{Binding SyncSourceLimitNote}"
-                               FontSize="11"
-                               Foreground="#7A8790"
-                               TextWrapping="Wrap"
-                               Margin="0,10,0,0" />
-
-                    <TextBlock Text="Auto Sync uses a linear chirp and normalized cross-correlation on the live routing path. Measured offsets are relative to the acoustic anchor (0 ms reference); absolute hardware latency is not known and only relative differences are calibrated. It reports measured acoustic arrival timing separately from software buffer estimates. If any routed destination cannot be measured reliably, the whole Auto Sync plan is rejected and no delays are changed; the manual test remains available. Bluetooth codec latency and clock drift are real physical effects and are not guaranteed to stay constant."
-                               FontSize="10"
-                               Foreground="#7A8790"
-                               TextWrapping="Wrap"
-                               Margin="0,8,0,0" />
-                </StackPanel>
-            </Border>
-        </Expander>
-
-        <!-- Smart Volume Balance -->
-        <Expander Grid.Row="6"
-                  Margin="2,12,2,0"
-                  IsExpanded="True">
-            <Expander.Header>
-                <TextBlock Text="Smart Volume Balance (relative loudness matching)"
-                           FontSize="12"
-                           FontWeight="SemiBold"
-                           Foreground="#41515C" />
-            </Expander.Header>
-            <Border Style="{StaticResource CardBorder}" Margin="0,6,0,0">
-                <StackPanel>
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-
-                        <CheckBox Content="Enable automatic balance"
-                                  IsChecked="{Binding BalanceEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                  IsEnabled="{Binding IsBalanceControlsEnabled}"
-                                  VerticalAlignment="Center"
-                                  ToolTip="Apply saved per-speaker attenuation on top of master volume and manual trims" />
-
-                        <TextBlock Grid.Column="1"
-                                   Text="{Binding BalanceSummary}"
-                                   FontSize="11"
-                                   Foreground="#41515C"
-                                   TextWrapping="Wrap"
-                                   Margin="18,0,0,0"
+                        <TextBlock Text="Theme" FontSize="12"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"
                                    VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1"
+                                  Margin="10,0,0,0"
+                                  ItemsSource="{Binding ThemeModes}"
+                                  SelectedItem="{Binding Theme, Mode=TwoWay}"
+                                  VerticalAlignment="Center" />
                     </Grid>
-
-                    <ItemsControl ItemsSource="{Binding Devices}" Margin="0,8,0,0">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Margin="0,3">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="70" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="300" />
-                                    </Grid.ColumnDefinitions>
-
-                                    <TextBlock Text="{Binding BalanceRoleLabel}"
-                                               FontSize="11"
-                                               Foreground="#5A6873"
-                                               VerticalAlignment="Center" />
-
-                                    <TextBlock Grid.Column="1"
-                                               Text="{Binding DisplayName}"
-                                               FontSize="12"
-                                               Foreground="#26343E"
-                                               TextTrimming="CharacterEllipsis"
-                                               Margin="0,0,12,0"
-                                               VerticalAlignment="Center" />
-
-                                    <Grid Grid.Column="2">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="112" />
-                                        </Grid.ColumnDefinitions>
-
-                                        <Slider Minimum="1"
-                                                Maximum="100"
-                                                TickFrequency="5"
-                                                SmallChange="1"
-                                                LargeChange="5"
-                                                Value="{Binding BalanceGainPercent, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                                IsEnabled="{Binding CanAdjustBalance}"
-                                                VerticalAlignment="Center"
-                                                ToolTip="Attenuation applied to this speaker. 100% = no attenuation; lower values make it quieter." />
-
-                                        <TextBlock Grid.Column="1"
-                                                   Text="{Binding BalanceGainText}"
-                                                   FontSize="11"
-                                                   Foreground="#41515C"
-                                                   HorizontalAlignment="Right"
-                                                   VerticalAlignment="Center" />
-                                    </Grid>
-                                </Grid>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-
-                    <TextBlock Text="{Binding BalanceStatus}"
-                               FontSize="11"
-                               Foreground="#2F6F8F"
-                               TextWrapping="Wrap"
-                               Margin="0,8,0,0" />
-
-                    <TextBlock Text="{Binding BalanceSourceLimitNote}"
-                               FontSize="11"
-                               Foreground="#7A8790"
-                               TextWrapping="Wrap"
-                               Margin="0,8,0,0" />
-
-                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                        <Button Content="Calibrate Volume"
-                                Command="{Binding CalibrateVolumeCommand}"
-                                ToolTip="Plays pink noise through one selected speaker at a time; routing must be stopped" />
-                        <Button Content="Reset Calibration"
-                                Command="{Binding ResetBalanceCommand}"
-                                ToolTip="Clears all saved corrections and returns every speaker to unity gain" />
-                        <Button Content="Save Calibration"
-                                Command="{Binding SaveBalanceCommand}"
-                                ToolTip="Persists manual adjustments and the current calibration by device id" />
-                    </StackPanel>
-
-                    <TextBlock Text="Calibration is available while routing is stopped. It uses the default Windows microphone and compares each speaker against the quietest measured one; it cannot measure calibrated absolute SPL. Test tones are attenuation-only and never boosted."
-                               FontSize="10"
-                               Foreground="#7A8790"
-                               TextWrapping="Wrap"
-                               Margin="0,8,0,0" />
                 </StackPanel>
-            </Border>
-        </Expander>
+            </Grid>
+        </Border>
 
-        <!-- Limitations -->
-        <Expander Grid.Row="7" Margin="2,12,2,0" IsExpanded="False">
-            <Expander.Header>
-                <TextBlock Text="How this works and what it cannot do"
-                           FontSize="12"
-                           FontWeight="SemiBold"
-                           Foreground="#41515C" />
-            </Expander.Header>
-            <Border Style="{StaticResource CardBorder}" Margin="0,6,0,0">
-                <StackPanel>
-                    <TextBlock TextWrapping="Wrap"
+        <!-- ======================= Content ======================= -->
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Slim status strip visible on every page -->
+            <Border Grid.Row="0"
+                    BorderBrush="{DynamicResource SeparatorBrush}"
+                    BorderThickness="0,0,0,1"
+                    Padding="28,10">
+                <Grid>
+                    <TextBlock Text="{Binding StatusMessage}"
                                FontSize="12"
-                               Foreground="#41515C"
-                               Text="Speaker Connect captures the WASAPI loopback mix of the selected source endpoint. Windows continues to play the original audio to that endpoint; the application sends converted copies to up to four checked destinations. That is five audible endpoints total: the source plus four copies. The source checkbox is disabled because routing it back to itself would create a feedback loop." />
-                    <TextBlock TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextSecondaryBrush}"
+                               TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding ErrorMessage}"
                                FontSize="12"
-                               Foreground="#41515C"
-                               Margin="0,8,0,0"
-                               Text="A loopback copy is not sample-accurate with the original playback. The pipeline has a base buffer for capture/render jitter and drift correction, plus endpoint hardware latency. Copies can be delayed relative to one another, but the original source cannot be delayed or advanced by this application. If the source is earlier than every copy, exact alignment with the source is impossible; the copies can only be aligned with each other. Bluetooth codec/transport latency adds another unknown offset. Use the per-device delay controls to delay the faster output path, not the slower one." />
-                    <TextBlock TextWrapping="Wrap"
-                               FontSize="12"
-                               Foreground="#41515C"
-                               Margin="0,8,0,0"
-                               Text="Smart Volume Balance is relative matching, not calibrated SPL. It measures each speaker with the default microphone, which has unknown frequency response and absolute sensitivity; room position and background noise also affect the result. Re-run calibration after moving a speaker or changing its Windows endpoint volume. The source speaker is the special case: because loopback capture is taken before endpoint volume, its correction must be applied by lowering its Windows endpoint volume. If the source is also the Windows default, that correction becomes the maximum reachable slider position while balance is active; the app re-caps the endpoint above it so the balance is not lost. Stop routing or disable automatic balance to restore the full Windows range. Driver-specific loopback behavior should be re-checked with the diagnostics probe; the current machine has been verified pre-volume." />
-                    <TextBlock TextWrapping="Wrap"
-                               FontSize="12"
-                               Foreground="#41515C"
-                               Margin="0,8,0,0"
-                               Text="Fully independent per-application routing to multiple endpoints is not possible with loopback alone. A proper solution needs a virtual audio endpoint architecture: an application (or virtual cable) renders into a virtual device, the router captures that endpoint's audio, and a clock-synchronised renderer fans out to up to four physical endpoints with independent volume, delay, and format conversion. Windows' apps still choose a single output endpoint, so a virtual endpoint is required to intercept their audio before the physical device. This architecture is not implemented yet." />
-                </StackPanel>
+                               Foreground="{DynamicResource ErrorBrush}"
+                               HorizontalAlignment="Right"
+                               TextTrimming="CharacterEllipsis"
+                               Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}" />
+                </Grid>
             </Border>
-        </Expander>
+
+            <Grid Grid.Row="1">
+                <views:DashboardView Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Dashboard}" />
+                <views:SyncView Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Synchronization}" />
+                <views:BalanceView Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=VolumeBalance}" />
+                <views:SettingsView Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Settings}" />
+            </Grid>
+        </Grid>
     </Grid>
 </Window>

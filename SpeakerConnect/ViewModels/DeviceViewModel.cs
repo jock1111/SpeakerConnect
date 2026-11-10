@@ -1,3 +1,4 @@
+using SpeakerConnect.Audio;
 using SpeakerConnect.Infrastructure;
 using SpeakerConnect.Models;
 
@@ -51,6 +52,7 @@ public sealed class DeviceViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsControlEnabled));
                 OnPropertyChanged(nameof(SelectedLabel));
                 OnPropertyChanged(nameof(BalanceRoleLabel));
+                OnPropertyChanged(nameof(ShowOutputBadge));
             }
         }
     }
@@ -66,6 +68,8 @@ public sealed class DeviceViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsControlEnabled));
                 OnPropertyChanged(nameof(IsReference));
                 OnPropertyChanged(nameof(BalanceRoleLabel));
+                OnPropertyChanged(nameof(ShowSourceBadge));
+                OnPropertyChanged(nameof(ShowOutputBadge));
             }
         }
     }
@@ -80,6 +84,7 @@ public sealed class DeviceViewModel : ObservableObject
             {
                 OnPropertyChanged(nameof(RoleLabel));
                 OnPropertyChanged(nameof(IsControlEnabled));
+                OnPropertyChanged(nameof(ShowReferenceBadge));
             }
         }
     }
@@ -347,6 +352,26 @@ public sealed class DeviceViewModel : ObservableObject
     public string VolumeText => $"{Volume:0}%";
 
     public string DelayText => $"{DelayMilliseconds} ms";
+
+    // ---------------- Card badges ----------------
+
+    /// <summary>
+    /// Best-effort Bluetooth hint from the endpoint name. Windows does not expose a
+    /// reliable transport-type flag, so this is a heuristic label only.
+    /// </summary>
+    public bool IsBluetooth => BluetoothEndpointHints.LooksLikeBluetooth(Device.FriendlyName);
+
+    public bool IsDefaultDevice => Device.IsDefault;
+
+    public bool ShowSourceBadge => IsSource;
+
+    public bool ShowOutputBadge => IsSelected && !IsSource;
+
+    public bool ShowReferenceBadge => IsReference;
+
+    public bool ShowBluetoothBadge => IsBluetooth;
+
+    public bool ShowDefaultBadge => IsDefaultDevice;
 
     public void ResetRuntimeStatus()
     {

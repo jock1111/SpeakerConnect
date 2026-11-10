@@ -53,6 +53,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         "time; measurements match relative loudness only, not calibrated absolute SPL.";
     private CancellationTokenSource? _calibrationCancellation;
     private CancellationTokenSource? _syncCancellation;
+    private readonly UiPreferencesStore _uiPreferences;
+    private AppPage _currentPage = AppPage.Dashboard;
+    private ThemeMode _theme = ThemeMode.Dark;
 
     public MainViewModel()
         : this(new AudioDeviceEnumerator(), new DeviceSettingsStore(), new VolumeBalanceStore())
@@ -63,7 +66,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         AudioDeviceEnumerator deviceEnumerator,
         DeviceSettingsStore deviceSettingsStore,
         VolumeBalanceStore balanceStore)
+        : this(deviceEnumerator, deviceSettingsStore, balanceStore, new UiPreferencesStore())
     {
+    }
+
+    internal MainViewModel(
+        AudioDeviceEnumerator deviceEnumerator,
+        DeviceSettingsStore deviceSettingsStore,
+        VolumeBalanceStore balanceStore,
+        UiPreferencesStore uiPreferences)
+    {
+        _uiPreferences = uiPreferences ?? throw new ArgumentNullException(nameof(uiPreferences));
+        _theme = _uiPreferences.Theme;
+        ThemeManager.Apply(_theme);
         _dispatcher = Dispatcher.CurrentDispatcher;
         _deviceEnumerator = deviceEnumerator ?? throw new ArgumentNullException(nameof(deviceEnumerator));
         _deviceSettingsStore = deviceSettingsStore ?? throw new ArgumentNullException(nameof(deviceSettingsStore));
@@ -154,6 +169,53 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public RelayCommand ResetBalanceCommand { get; }
 
     public RelayCommand SaveBalanceCommand { get; }
+
+    // ---------------- Navigation ----------------
+
+    /// <summary>Sidebar pages shown in the main window.</summary>
+    public IReadOnlyList<AppPageItem> Pages { get; } = new[]
+    {
+        new AppPageItem(AppPage.Dashboard, "Dashboard", "\uE80F"),
+        new AppPageItem(AppPage.Synchronization, "Synchronization", "\uE895"),
+        new AppPageItem(AppPage.VolumeBalance, "Volume Balance", "\uE767"),
+        new AppPageItem(AppPage.Settings, "Settings", "\uE713")
+    };
+
+    /// <summary>The currently visible page. Switching pages never touches routing.</summary>
+    public AppPage CurrentPage
+    {
+        get => _currentPage;
+        set => SetProperty(ref _currentPage, value);
+    }
+
+    /// <summary>Compact endpoint usage readout for the dashboard header.</summary>
+    public string EndpointSummary
+    {
+        get
+        {
+            var active = (SourceDevice is null ? 0 : 1) + SelectedOutputCount;
+            return $"{active} of {MaxTotalAudibleDevices} endpoints active";
+        }
+    }
+
+    // ---------------- Appearance ----------------
+
+    public IReadOnlyList<ThemeMode> ThemeModes { get; } =
+        (ThemeMode[])Enum.GetValues(typeof(ThemeMode));
+
+    /// <summary>Selected application theme; applied immediately and persisted.</summary>
+    public ThemeMode Theme
+    {
+        get => _theme;
+        set
+        {
+            if (SetProperty(ref _theme, value))
+            {
+                ThemeManager.Apply(value);
+                _uiPreferences.SaveTheme(value);
+            }
+        }
+    }
 
     public float MasterVolume
     {
@@ -616,6 +678,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         catch (Exception)
         {
             // Settings flushing is best-effort during shutdown.
+        }
+
+        try
+        {
+            _uiPreferences.Dispose();
+        }
+        catch (Exception)
+        {
+            // Preferences flushing is best-effort during shutdown.
         }
 
         GC.SuppressFinalize(this);
@@ -1290,6 +1361,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         OnPropertyChanged(nameof(SelectedOutputCount));
         OnPropertyChanged(nameof(SelectionSummary));
+        OnPropertyChanged(nameof(EndpointSummary));
         OnPropertyChanged(nameof(BalanceSummary));
     }
 

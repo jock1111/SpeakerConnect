@@ -1,0 +1,128 @@
+<UserControl x:Class="SpeakerConnect.Views.BalanceView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="28,20,28,28">
+
+            <TextBlock Text="Volume Balance" Style="{StaticResource PageTitle}" />
+            <TextBlock Text="Match relative loudness across speakers with attenuation-only corrections."
+                       Style="{StaticResource BodyText}"
+                       Margin="0,4,0,0" />
+
+            <!-- Enable + actions -->
+            <Border Style="{StaticResource CardBorder}" Margin="0,16,0,0">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <CheckBox Grid.Column="0"
+                                  Content="Enable automatic balance"
+                                  FontSize="14"
+                                  FontWeight="SemiBold"
+                                  IsChecked="{Binding BalanceEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                  IsEnabled="{Binding IsBalanceControlsEnabled}"
+                                  VerticalAlignment="Center"
+                                  ToolTip="Apply saved per-speaker attenuation on top of master volume and manual trims" />
+
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding BalanceSummary}"
+                                   Style="{StaticResource CaptionText}"
+                                   Margin="20,0,0,0"
+                                   VerticalAlignment="Center" />
+                    </Grid>
+
+                    <WrapPanel Margin="0,14,0,0">
+                        <Button Content="Calibrate Volume"
+                                Style="{StaticResource PrimaryButton}"
+                                Command="{Binding CalibrateVolumeCommand}"
+                                Margin="0,0,10,8"
+                                ToolTip="Plays pink noise through one selected speaker at a time; routing must be stopped" />
+                        <Button Content="Reset Calibration"
+                                Command="{Binding ResetBalanceCommand}"
+                                Margin="0,0,10,8"
+                                ToolTip="Clears all saved corrections and returns every speaker to unity gain" />
+                        <Button Content="Save Calibration"
+                                Command="{Binding SaveBalanceCommand}"
+                                Margin="0,0,10,8"
+                                ToolTip="Persists manual adjustments and the current calibration by device id" />
+                    </WrapPanel>
+
+                    <TextBlock Text="{Binding BalanceStatus}"
+                               FontSize="13"
+                               Foreground="{DynamicResource InfoBrush}"
+                               TextWrapping="Wrap"
+                               Margin="0,8,0,0" />
+                    <TextBlock Text="{Binding BalanceSourceLimitNote}"
+                               Style="{StaticResource CaptionText}"
+                               Foreground="{DynamicResource WarningBrush}"
+                               Margin="0,8,0,0" />
+                    <TextBlock Text="Calibration is available while routing is stopped. It uses the default Windows microphone and compares each speaker against the quietest measured one; it cannot measure calibrated absolute SPL. Corrections are attenuation-only and never boosted."
+                               Style="{StaticResource CaptionText}"
+                               Margin="0,8,0,0" />
+                </StackPanel>
+            </Border>
+
+            <!-- Per-speaker attenuation -->
+            <Border Style="{StaticResource CardBorder}" Margin="0,12,0,0">
+                <StackPanel>
+                    <TextBlock Text="Per-speaker compensation" Style="{StaticResource CardTitle}" />
+                    <TextBlock Text="Lower values make that speaker quieter. 100% means no attenuation; corrections are never boosted above unity."
+                               Style="{StaticResource CaptionText}"
+                               Margin="0,4,0,0" />
+
+                    <ItemsControl ItemsSource="{Binding Devices}" Margin="0,10,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Style="{StaticResource SubtleBorder}" Margin="0,0,0,8">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="90" />
+                                            <ColumnDefinition Width="*" MinWidth="140" />
+                                            <ColumnDefinition Width="20" />
+                                            <ColumnDefinition Width="130" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <TextBlock Text="{Binding BalanceRoleLabel}"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                                   VerticalAlignment="Center" />
+
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding DisplayName}"
+                                                   FontSize="13"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Margin="0,0,12,0"
+                                                   VerticalAlignment="Center" />
+
+                                        <Slider Grid.Column="2"
+                                                Minimum="1" Maximum="100"
+                                                TickFrequency="5" SmallChange="1" LargeChange="5"
+                                                Value="{Binding BalanceGainPercent, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                IsEnabled="{Binding CanAdjustBalance}"
+                                                VerticalAlignment="Center"
+                                                ToolTip="Attenuation applied to this speaker. 100% = no attenuation; lower values make it quieter." />
+
+                                        <TextBlock Grid.Column="3"
+                                                   Text="{Binding BalanceGainText}"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                                   HorizontalAlignment="Right"
+                                                   VerticalAlignment="Center" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

@@ -1,0 +1,147 @@
+<UserControl x:Class="SpeakerConnect.Views.SyncView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="28,20,28,28">
+
+            <TextBlock Text="Synchronization" Style="{StaticResource PageTitle}" />
+            <TextBlock Text="Align speaker copies with each other using a microphone measurement or a live listening test."
+                       Style="{StaticResource BodyText}"
+                       Margin="0,4,0,0" />
+
+            <!-- Status -->
+            <Border Style="{StaticResource CardBorder}" Margin="0,16,0,0">
+                <StackPanel>
+                    <TextBlock Text="{Binding SyncStatus}"
+                               FontSize="14"
+                               Foreground="{DynamicResource TextPrimaryBrush}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding SyncDetail}"
+                               Style="{StaticResource BodyText}"
+                               Margin="0,8,0,0"
+                               Visibility="{Binding HasSyncDetail, Converter={StaticResource BoolToVisibility}}" />
+                </StackPanel>
+            </Border>
+
+            <!-- Actions -->
+            <Border Style="{StaticResource CardBorder}" Margin="0,12,0,0">
+                <StackPanel>
+                    <TextBlock Text="Measurement" Style="{StaticResource CardTitle}" />
+                    <TextBlock Text="Auto Sync plays a chirp through one speaker at a time and measures arrival times with the default microphone. Manual Sync plays a burst train you align by ear."
+                               Style="{StaticResource CaptionText}"
+                               Margin="0,4,0,0" />
+
+                    <WrapPanel Margin="0,12,0,0">
+                        <Button Content="Auto Sync"
+                                Style="{StaticResource PrimaryButton}"
+                                Command="{Binding AutoSyncCommand}"
+                                Margin="0,0,10,8"
+                                ToolTip="Measures every routed destination and the source with a microphone chirp, then applies and saves delays. Routing must be running." />
+                        <Button Content="Manual Sync"
+                                Command="{Binding ManualSyncCommand}"
+                                Margin="0,0,10,8"
+                                ToolTip="Plays a burst train through the real loopback/delay path so you can align speakers by ear. Delay sliders stay live during the test." />
+                        <Button Content="Cancel"
+                                Command="{Binding CancelSyncCommand}"
+                                Margin="0,0,10,8"
+                                ToolTip="Cancels Auto Sync or the manual test without applying a partial result" />
+                        <Button Content="Reset Sync"
+                                Command="{Binding ResetSyncCommand}"
+                                Margin="0,0,10,8"
+                                ToolTip="Clears every configured delay and saved acoustic timing result" />
+                        <Button Content="Save Calibration"
+                                Command="{Binding SaveSyncCommand}"
+                                Margin="0,0,10,8"
+                                ToolTip="Persists the current delays and any acoustic measurement metadata by endpoint id" />
+                    </WrapPanel>
+
+                    <Grid Margin="0,4,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="300" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Text="Reference speaker"
+                                   Style="{StaticResource BodyText}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,12,0" />
+
+                        <ComboBox Grid.Column="1"
+                                  ItemsSource="{Binding SyncReferenceCandidates}"
+                                  SelectedItem="{Binding ReferenceDevice, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName"
+                                  IsEnabled="{Binding IsSyncControlsEnabled}"
+                                  ToolTip="Speaker used as the audible comparison point during the manual test" />
+
+                        <TextBlock Grid.Column="2"
+                                   Text="{Binding ReferenceSummary}"
+                                   Style="{StaticResource CaptionText}"
+                                   TextWrapping="Wrap"
+                                   Margin="16,0,0,0"
+                                   VerticalAlignment="Center" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Per-speaker timing -->
+            <Border Style="{StaticResource CardBorder}" Margin="0,12,0,0">
+                <StackPanel>
+                    <TextBlock Text="Per-speaker timing" Style="{StaticResource CardTitle}" />
+                    <TextBlock Text="Measured offsets are relative to the acoustic anchor (0 ms reference). Negative means the speaker sounded earlier; positive means later. Absolute hardware latency is not known."
+                               Style="{StaticResource CaptionText}"
+                               Margin="0,4,0,0" />
+
+                    <ItemsControl ItemsSource="{Binding Devices}" Margin="0,10,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Style="{StaticResource SubtleBorder}" Margin="0,0,0,8">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="90" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   FontSize="13"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   VerticalAlignment="Top" />
+
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding DelayText}"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Top" />
+
+                                        <TextBlock Grid.Column="2"
+                                                   Text="{Binding SyncMeasurementDisplay}"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                                   TextWrapping="Wrap" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBlock Text="{Binding SyncSourceLimitNote}"
+                               Style="{StaticResource CaptionText}"
+                               Foreground="{DynamicResource WarningBrush}"
+                               Margin="0,8,0,0" />
+
+                    <TextBlock Text="Auto Sync uses a linear chirp and normalized cross-correlation on the live routing path. If any routed destination cannot be measured reliably, the whole plan is rejected and no delays change; the manual test remains available. Bluetooth codec latency and clock drift are real physical effects and are not guaranteed to stay constant."
+                               Style="{StaticResource CaptionText}"
+                               Margin="0,8,0,0" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

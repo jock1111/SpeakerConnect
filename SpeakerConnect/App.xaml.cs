@@ -32,6 +32,11 @@ public partial class App : Application
 
         base.OnStartup(e);
 
+        // Apply the saved theme before any window or resource is created.
+        var preferences = new Infrastructure.UiPreferencesStore();
+        Infrastructure.ThemeManager.Apply(preferences.Theme);
+        preferences.Dispose();
+
         var window = new MainWindow();
         MainWindow = window;
         window.Show();
