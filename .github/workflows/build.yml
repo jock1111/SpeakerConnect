@@ -1,0 +1,42 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore SpeakerConnect.slnx
+
+      - name: Build (Release)
+        run: dotnet build SpeakerConnect.slnx -c Release --no-restore
+
+      - name: Run hardware-independent diagnostics
+        # Logic tests only: no audio devices are touched, so this is safe on a
+        # hosted runner. Hardware/signal modes (--hardware, --signal) require
+        # real endpoints and are intentionally not run here.
+        run: dotnet run --project SpeakerConnect.Diagnostics/SpeakerConnect.Diagnostics.csproj -c Release --no-build
+
+      - name: Publish self-contained win-x64
+        run: dotnet publish SpeakerConnect/SpeakerConnect.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeakerConnect-win-x64
+          path: publish/win-x64
+          if-no-files-found: error
