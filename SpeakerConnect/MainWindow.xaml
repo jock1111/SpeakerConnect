@@ -13,6 +13,7 @@
         WindowStartupLocation="CenterScreen"
         FontFamily="Segoe UI Variable Text, Segoe UI"
         FontSize="13"
+        TextOptions.TextFormattingMode="Display"
         Background="{DynamicResource PageBackgroundBrush}">
     <Grid>
         <Grid.ColumnDefinitions>

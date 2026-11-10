@@ -45,10 +45,12 @@
                                 Margin="0,0,10,8"
                                 ToolTip="Plays pink noise through one selected speaker at a time; routing must be stopped" />
                         <Button Content="Reset Calibration"
+                                Style="{StaticResource DangerButton}"
                                 Command="{Binding ResetBalanceCommand}"
                                 Margin="0,0,10,8"
                                 ToolTip="Clears all saved corrections and returns every speaker to unity gain" />
                         <Button Content="Save Calibration"
+                                Style="{StaticResource PrimaryButton}"
                                 Command="{Binding SaveBalanceCommand}"
                                 Margin="0,0,10,8"
                                 ToolTip="Persists manual adjustments and the current calibration by device id" />
@@ -121,8 +123,8 @@
 
                                         <TextBlock Grid.Column="3"
                                                    Text="{Binding BalanceGainText}"
+                                                   Style="{StaticResource ControlValueText}"
                                                    FontSize="12"
-                                                   Foreground="{DynamicResource TextSecondaryBrush}"
                                                    HorizontalAlignment="Right"
                                                    VerticalAlignment="Center" />
                                     </Grid>

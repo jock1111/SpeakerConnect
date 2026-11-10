@@ -8,7 +8,8 @@
         <!-- Speaker card template shared by the dashboard list -->
         <DataTemplate x:Key="SpeakerCardTemplate">
             <Border Style="{StaticResource SpeakerCardBorder}"
-                    Margin="0,0,0,12">
+                    Margin="0,0,0,12"
+                    BorderBrush="{Binding IsSelected, Converter={StaticResource SelectedBorder}}">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -31,12 +32,26 @@
                                   ToolTip="Route a copy of the loopback audio to this speaker" />
 
                         <StackPanel Grid.Column="1" Margin="12,0,12,0">
-                            <TextBlock Text="{Binding DisplayName}"
-                                       FontSize="15"
-                                       FontWeight="SemiBold"
-                                       Foreground="{DynamicResource TextPrimaryBrush}"
-                                       TextTrimming="CharacterEllipsis" />
-                            <WrapPanel VerticalAlignment="Center" Margin="0,4,0,0">
+                            <StackPanel Orientation="Horizontal">
+                                <Border Width="30" Height="30" CornerRadius="8"
+                                        Background="{DynamicResource SubtleBackgroundBrush}"
+                                        VerticalAlignment="Center">
+                                    <TextBlock Text="&#xE767;"
+                                               FontFamily="Segoe MDL2 Assets"
+                                               FontSize="15"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock Text="{Binding DisplayName}"
+                                           FontSize="15"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource TextPrimaryBrush}"
+                                           TextTrimming="CharacterEllipsis"
+                                           VerticalAlignment="Center"
+                                           Margin="10,0,0,0" />
+                            </StackPanel>
+                            <WrapPanel VerticalAlignment="Center" Margin="40,4,0,0">
                                 <Border Style="{StaticResource BadgeBorder}"
                                         Background="{DynamicResource BadgeSourceBackgroundBrush}"
                                         Visibility="{Binding ShowSourceBadge, Converter={StaticResource BoolToVisibility}}">
@@ -93,8 +108,9 @@
 
                         <Button Grid.Column="2"
                                 Content="Ref"
+                                Style="{StaticResource SubtleButton}"
                                 MinWidth="44"
-                                Padding="10,5"
+                                Padding="10,4"
                                 FontSize="12"
                                 VerticalAlignment="Top"
                                 Margin="0,2,0,0"
@@ -115,7 +131,8 @@
                         <StackPanel Grid.Column="0">
                             <Grid>
                                 <TextBlock Text="Volume" Style="{StaticResource CaptionText}" />
-                                <TextBlock Text="{Binding VolumeText}" Style="{StaticResource CaptionText}"
+                                <TextBlock Text="{Binding VolumeText}" Style="{StaticResource ControlValueText}"
+                                           FontSize="12"
                                            HorizontalAlignment="Right" />
                             </Grid>
                             <Slider Minimum="0" Maximum="100"
@@ -127,7 +144,8 @@
                         <StackPanel Grid.Column="2">
                             <Grid>
                                 <TextBlock Text="Delay" Style="{StaticResource CaptionText}" />
-                                <TextBlock Text="{Binding DelayText}" Style="{StaticResource CaptionText}"
+                                <TextBlock Text="{Binding DelayText}" Style="{StaticResource ControlValueText}"
+                                           FontSize="12"
                                            HorizontalAlignment="Right" />
                             </Grid>
                             <Slider Minimum="0" Maximum="2000"
@@ -154,7 +172,13 @@
                        Margin="0,4,0,0" />
 
             <!-- Routing status hero -->
-            <Border Style="{StaticResource CardBorder}" Margin="0,16,0,0">
+            <Border Style="{StaticResource CardBorder}"
+                    Margin="0,16,0,0"
+                    Padding="22,18">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="18" ShadowDepth="0"
+                                      Opacity="0.28" Color="Black" />
+                </Border.Effect>
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
@@ -183,7 +207,12 @@
                                 Command="{Binding StartCommand}"
                                 Visibility="{Binding IsRunning, Converter={StaticResource InverseBoolToVisibility}}" />
                         <Button Content="Stop"
-                                Style="{StaticResource TransportButton}"
+                                Style="{StaticResource DangerButton}"
+                                MinWidth="170"
+                                MinHeight="52"
+                                FontSize="16"
+                                FontWeight="SemiBold"
+                                Padding="30,10"
                                 Command="{Binding StopCommand}"
                                 Visibility="{Binding IsRunning, Converter={StaticResource BoolToVisibility}}" />
                     </StackPanel>
@@ -208,7 +237,7 @@
                             <TextBlock Text="Group volume applied to every speaker"
                                        Style="{StaticResource CaptionText}" />
                             <TextBlock Text="{Binding MasterVolume, StringFormat={}{0:0}%}"
-                                       Style="{StaticResource ValueText}"
+                                       Style="{StaticResource ControlValueText}"
                                        HorizontalAlignment="Right" />
                         </Grid>
                         <Slider Minimum="0" Maximum="100"
@@ -253,7 +282,8 @@
                                   ToolTip="The endpoint whose audio is mirrored to the other speakers" />
 
                         <Button Grid.Column="2"
-                                Content="Use Bluetooth source"
+                                Content="BT source"
+                                Style="{StaticResource SubtleButton}"
                                 Command="{Binding UseBluetoothSourceCommand}"
                                 IsEnabled="{Binding IsConfigurationEnabled}"
                                 VerticalAlignment="Center"
@@ -284,7 +314,8 @@
                            VerticalAlignment="Bottom"
                            Margin="0,0,12,0" />
                 <Button Grid.Column="2"
-                        Content="Rescan devices"
+                        Content="Rescan"
+                        Style="{StaticResource SubtleButton}"
                         Command="{Binding RefreshCommand}"
                         VerticalAlignment="Center"
                         ToolTip="Re-enumerate Windows audio endpoints" />

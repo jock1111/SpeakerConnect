@@ -43,6 +43,30 @@ public sealed class InverseBoolToVisibilityConverter : IValueConverter
     }
 }
 
+/// <summary>
+/// Maps a selection flag to a card border brush: accent outline for routed
+/// (selected) speakers, the neutral separator otherwise. Resolved from app
+/// resources so it follows the theme.
+/// </summary>
+public sealed class SelectedBorderConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        var key = value is bool selected && selected ? "AccentBrush" : "SeparatorBrush";
+        if (Application.Current?.TryFindResource(key) is Brush brush)
+        {
+            return brush;
+        }
+
+        return Brushes.Gray;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        throw new NotSupportedException();
+    }
+}
+
 /// <summary>Maps the routing-running flag to "Routing" / "Stopped" text.</summary>
 public sealed class RunningStateTextConverter : IValueConverter
 {

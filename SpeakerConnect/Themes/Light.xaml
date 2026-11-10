@@ -40,7 +40,11 @@
     <SolidColorBrush x:Key="SuccessBrush" Color="#107C10" />
     <SolidColorBrush x:Key="WarningBrush" Color="#9D5D00" />
     <SolidColorBrush x:Key="ErrorBrush" Color="#C42B1C" />
+    <SolidColorBrush x:Key="ErrorSubtleBrush" Color="#FDE7E9" />
     <SolidColorBrush x:Key="InfoBrush" Color="#0067C0" />
+
+    <!-- Slider -->
+    <SolidColorBrush x:Key="SliderThumbBrush" Color="#FFFFFF" />
 
     <!-- Badges -->
     <SolidColorBrush x:Key="BadgeSourceBackgroundBrush" Color="#D6E8F7" />
