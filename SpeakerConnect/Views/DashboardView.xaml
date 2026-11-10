@@ -7,9 +7,8 @@
     <UserControl.Resources>
         <!-- Speaker card template shared by the dashboard list -->
         <DataTemplate x:Key="SpeakerCardTemplate">
-            <Border Style="{StaticResource CardBorder}"
-                    Margin="0,0,0,12"
-                    Padding="16,14">
+            <Border Style="{StaticResource SpeakerCardBorder}"
+                    Margin="0,0,0,12">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -32,12 +31,12 @@
                                   ToolTip="Route a copy of the loopback audio to this speaker" />
 
                         <StackPanel Grid.Column="1" Margin="12,0,12,0">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="{Binding DisplayName}"
-                                           FontSize="15"
-                                           FontWeight="SemiBold"
-                                           Foreground="{DynamicResource TextPrimaryBrush}"
-                                           TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{Binding DisplayName}"
+                                       FontSize="15"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextPrimaryBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <WrapPanel VerticalAlignment="Center" Margin="0,4,0,0">
                                 <Border Style="{StaticResource BadgeBorder}"
                                         Background="{DynamicResource BadgeSourceBackgroundBrush}"
                                         Visibility="{Binding ShowSourceBadge, Converter={StaticResource BoolToVisibility}}">
@@ -59,7 +58,7 @@
                                 <Border Style="{StaticResource BadgeBorder}"
                                         Background="{DynamicResource BadgeNeutralBackgroundBrush}"
                                         Visibility="{Binding ShowBluetoothBadge, Converter={StaticResource BoolToVisibility}}">
-                                    <TextBlock Text="Bluetooth?" Style="{StaticResource BadgeText}"
+                                    <TextBlock Text="Bluetooth" Style="{StaticResource BadgeText}"
                                                Foreground="{DynamicResource BadgeNeutralTextBrush}" />
                                 </Border>
                                 <Border Style="{StaticResource BadgeBorder}"
@@ -68,7 +67,7 @@
                                     <TextBlock Text="Default" Style="{StaticResource BadgeText}"
                                                Foreground="{DynamicResource BadgeNeutralTextBrush}" />
                                 </Border>
-                            </StackPanel>
+                            </WrapPanel>
 
                             <TextBlock Text="{Binding Details}"
                                        Style="{StaticResource CaptionText}"
@@ -167,7 +166,8 @@
                                        Style="{StaticResource CardTitle}"
                                        FontSize="17"
                                        Margin="10,0,0,0"
-                                       VerticalAlignment="Center" />
+                                       VerticalAlignment="Center"
+                                       Foreground="{Binding IsRunning, Converter={StaticResource RunningToBrush}}" />
                         </StackPanel>
                         <TextBlock Text="{Binding EndpointSummary}"
                                    Style="{StaticResource CaptionText}"
@@ -272,12 +272,19 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="Speakers" Style="{StaticResource SectionTitle}" />
                 <TextBlock Grid.Column="1"
                            Text="{Binding SelectionSummary}"
                            Style="{StaticResource CaptionText}"
-                           VerticalAlignment="Bottom" />
+                           VerticalAlignment="Bottom"
+                           Margin="0,0,12,0" />
+                <Button Grid.Column="2"
+                        Content="Rescan devices"
+                        Command="{Binding RefreshCommand}"
+                        VerticalAlignment="Center"
+                        ToolTip="Re-enumerate Windows audio endpoints" />
             </Grid>
 
             <ItemsControl ItemsSource="{Binding Devices}">

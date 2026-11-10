@@ -116,7 +116,7 @@
                     BorderBrush="{DynamicResource SeparatorBrush}"
                     BorderThickness="0,0,0,1"
                     Padding="28,10">
-                <Grid>
+                <StackPanel>
                     <TextBlock Text="{Binding StatusMessage}"
                                FontSize="12"
                                Foreground="{DynamicResource TextSecondaryBrush}"
@@ -124,10 +124,10 @@
                     <TextBlock Text="{Binding ErrorMessage}"
                                FontSize="12"
                                Foreground="{DynamicResource ErrorBrush}"
-                               HorizontalAlignment="Right"
                                TextTrimming="CharacterEllipsis"
+                               Margin="0,2,0,0"
                                Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}" />
-                </Grid>
+                </StackPanel>
             </Border>
 
             <Grid Grid.Row="1">

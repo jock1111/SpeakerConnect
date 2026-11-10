@@ -58,6 +58,17 @@
         <Setter Property="BorderThickness" Value="1" />
     </Style>
 
+    <!-- Speaker cards are interactive (checkbox, sliders, Ref), so they get a
+         subtle hover lift like Fluent list items. -->
+    <Style x:Key="SpeakerCardBorder" TargetType="Border" BasedOn="{StaticResource CardBorder}">
+        <Setter Property="Padding" Value="16,14" />
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{DynamicResource CardHoverBackgroundBrush}" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
     <Style x:Key="SubtleBorder" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource SubtleBackgroundBrush}" />
         <Setter Property="CornerRadius" Value="6" />
