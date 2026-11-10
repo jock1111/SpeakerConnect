@@ -40,12 +40,14 @@ public sealed class AudioOutputChannel : IDisposable
     private readonly MMDevice _device;
     private readonly JitterBufferSampleProvider _jitterBuffer;
     private readonly GainSampleProvider _gain;
+    private readonly SmoothGainSampleProvider _testGain;
     private readonly MasterVolumeManager? _masterVolume;
     private WasapiOut? _output;
     private volatile bool _expectedStop;
     private volatile bool _disposed;
     private int _state = (int)AudioChannelState.Stopped;
     private int _delayMilliseconds;
+    private int _effectiveBaseLatencyMilliseconds;
     private float _volume;
     private volatile string? _error;
     private int _wasapiLatencyMilliseconds;
@@ -59,7 +61,8 @@ public sealed class AudioOutputChannel : IDisposable
         float volume,
         int delayMilliseconds,
         double driftWindowMilliseconds = 50,
-        MasterVolumeManager? masterVolume = null)
+        MasterVolumeManager? masterVolume = null,
+        string? profileName = null)
     {
         _device = device ?? throw new ArgumentNullException(nameof(device));
         ArgumentNullException.ThrowIfNull(buffer);
@@ -73,9 +76,9 @@ public sealed class AudioOutputChannel : IDisposable
         DeviceId = device.ID;
         DeviceName = device.FriendlyName;
         TargetFormat = targetFormat;
-        BaseLatencyMilliseconds = Math.Max(0, baseLatencyMilliseconds);
+        _effectiveBaseLatencyMilliseconds = Math.Max(0, baseLatencyMilliseconds);
         RequestedWasapiLatencyMilliseconds = Math.Clamp(wasapiLatencyMilliseconds, 20, 200);
-        ProfileName = BufferProfile.All
+        ProfileName = profileName ?? BufferProfile.All
             .FirstOrDefault(profile => profile.BaseLatencyMs == BaseLatencyMilliseconds &&
                                        profile.WasapiLatencyMs == RequestedWasapiLatencyMilliseconds)
             ?.DisplayName ?? "Custom";
@@ -112,6 +115,11 @@ public sealed class AudioOutputChannel : IDisposable
             }
 
             pipeline = _gain;
+
+            // Test isolation gain is normally 1. During Auto Sync it mutes every
+            // destination except the one being measured; the ramp avoids clicks.
+            _testGain = new SmoothGainSampleProvider(pipeline);
+            pipeline = _testGain;
 
             if (targetFormat.Channels == 1)
             {
@@ -195,8 +203,31 @@ public sealed class AudioOutputChannel : IDisposable
 
     public WaveFormat TargetFormat { get; }
 
-    /// <summary>Jitter-buffer lag configured for this channel (profile base latency).</summary>
-    public int BaseLatencyMilliseconds { get; }
+    /// <summary>Effective shared jitter-buffer lag configured for this channel.</summary>
+    public int BaseLatencyMilliseconds => Volatile.Read(ref _effectiveBaseLatencyMilliseconds);
+
+    /// <summary>
+    /// Raises this channel's shared base latency when another destination had to
+    /// fall back to a more robust profile. Keeping one common base latency across
+    /// destinations prevents a profile change from introducing a new echo.
+    /// </summary>
+    public void SetBaseLatencyMilliseconds(int baseLatencyMilliseconds)
+    {
+        var clamped = Math.Max(0, baseLatencyMilliseconds);
+        Volatile.Write(ref _effectiveBaseLatencyMilliseconds, clamped);
+        _jitterBuffer.SetBaseLatencyMilliseconds(clamped);
+    }
+
+    /// <summary>
+    /// Test-only isolation multiplier. 1 = normal playback, 0 = silent. The value
+    /// is ramped inside the audio pipeline, so Auto Sync can mute other speakers
+    /// without an audible click.
+    /// </summary>
+    public float TestGain
+    {
+        get => _testGain.Gain;
+        set => _testGain.SetGain(value);
+    }
 
     /// <summary>Display name of the buffer profile this channel was started with.</summary>
     public string ProfileName { get; }

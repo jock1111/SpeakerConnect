@@ -93,6 +93,7 @@ public sealed class AudioRoutingEngine : IDisposable
 
     private readonly object _gate = new();
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
+    private readonly SemaphoreSlim _syncGate = new(1, 1);
     private readonly AudioDeviceEnumerator _deviceEnumerator;
     private readonly AudioDeviceWatcher _deviceWatcher;
     private readonly Dictionary<string, AudioOutputChannel> _channels =
@@ -109,6 +110,8 @@ public sealed class AudioRoutingEngine : IDisposable
     private volatile BufferProfile? _activeProfile;
     private readonly StabilityMonitor _stabilityMonitor = new();
     private MasterVolumeManager? _masterVolume;
+    private CancellationTokenSource? _syncCancellation;
+    private volatile bool _syncTestActive;
 
     public AudioRoutingEngine(AudioDeviceEnumerator deviceEnumerator, AudioDeviceWatcher deviceWatcher)
     {
@@ -299,6 +302,10 @@ public sealed class AudioRoutingEngine : IDisposable
                 new[] { validationError });
         }
 
+        CancelSyncTest();
+        _syncGate.Wait();
+        _syncGate.Release();
+
         _lifecycle.Wait();
         try
         {
@@ -357,6 +364,8 @@ public sealed class AudioRoutingEngine : IDisposable
 
     public void Stop()
     {
+        CancelSyncTest();
+
         _lifecycle.Wait();
         try
         {
@@ -372,7 +381,19 @@ public sealed class AudioRoutingEngine : IDisposable
             }
 
             SetState(AudioRoutingState.Stopping);
-            CleanupResources();
+
+            // A running sync test uses the live channels and ring. Wait for it to
+            // observe cancellation before the channels are disposed.
+            _syncGate.Wait();
+            try
+            {
+                CleanupResources();
+            }
+            finally
+            {
+                _syncGate.Release();
+            }
+
             SetState(AudioRoutingState.Stopped);
         }
         finally
@@ -408,12 +429,23 @@ public sealed class AudioRoutingEngine : IDisposable
 
         _deviceWatcher.DeviceRemoved -= OnDeviceRemoved;
 
+        CancelSyncTest();
+
         _lifecycle.Wait();
         try
         {
             _disposed = true;
             SetState(AudioRoutingState.Stopping);
-            CleanupResources();
+            _syncGate.Wait();
+            try
+            {
+                CleanupResources();
+            }
+            finally
+            {
+                _syncGate.Release();
+            }
+
             SetState(AudioRoutingState.Stopped);
         }
         finally
@@ -695,6 +727,14 @@ public sealed class AudioRoutingEngine : IDisposable
                 return;
             }
 
+            if (_syncTestActive)
+            {
+                // Buffer-profile rebuilds would reset test isolation and move the
+                // content timing the measurement is relying on. Resume monitoring
+                // after the test releases the channels.
+                continue;
+            }
+
             IReadOnlyList<AudioChannelStatus> statuses;
             try
             {
@@ -755,6 +795,7 @@ public sealed class AudioRoutingEngine : IDisposable
         try
         {
             if (_disposed ||
+                _syncTestActive ||
                 generation != Volatile.Read(ref _sessionGeneration))
             {
                 return;
@@ -765,6 +806,8 @@ public sealed class AudioRoutingEngine : IDisposable
             AudioRingBuffer? ringBuffer;
             float volume;
             int delayMilliseconds;
+            int sharedBaseLatencyMilliseconds = escalatedProfile.BaseLatencyMs;
+            List<AudioOutputChannel> otherChannels;
 
             lock (_gate)
             {
@@ -780,6 +823,16 @@ public sealed class AudioRoutingEngine : IDisposable
 
                 volume = previous.Volume;
                 delayMilliseconds = previous.DelayMilliseconds;
+                otherChannels = _channels.Values
+                    .Where(channel => !ReferenceEquals(channel, previous))
+                    .ToList();
+
+                foreach (var channel in otherChannels)
+                {
+                    sharedBaseLatencyMilliseconds = Math.Max(
+                        sharedBaseLatencyMilliseconds,
+                        channel.BaseLatencyMilliseconds);
+                }
             }
 
             var status = previous.GetStatus();
@@ -798,12 +851,25 @@ public sealed class AudioRoutingEngine : IDisposable
                     replacementDevice,
                     ringBuffer,
                     targetFormat,
-                    escalatedProfile.BaseLatencyMs,
+                    sharedBaseLatencyMilliseconds,
                     escalatedProfile.WasapiLatencyMs,
                     volume,
                     delayMilliseconds,
                     escalatedProfile.DriftWindowMs,
                     _masterVolume);
+
+                // Preserve the shared base latency across every destination. If one
+                // endpoint needs a deeper buffer, all readers use the same deeper lag;
+                // otherwise the fallback itself would create a new echo.
+                foreach (var channel in otherChannels)
+                {
+                    if (channel.BaseLatencyMilliseconds < sharedBaseLatencyMilliseconds)
+                    {
+                        channel.SetBaseLatencyMilliseconds(sharedBaseLatencyMilliseconds);
+                    }
+                }
+
+                replacement.TestGain = previous.TestGain;
 
                 // The capture stream has moved on since the previous reader stopped;
                 // anchor the new reader at the newest frame so it never replays audio.
@@ -859,175 +925,632 @@ public sealed class AudioRoutingEngine : IDisposable
         }
     }
 
-    private const float CalibrationImpulseVolume = 0.4f;
-    private const double CalibrationPrefixSeconds = 0.20;
-    private const double CalibrationBurstSeconds = 0.25;
-    private const double CalibrationTailSeconds = 0.85;
+    private const int SyncTrialCount = 3;
+    private const double SyncScheduleLeadSeconds = 0.35;
+
+    // The expected arrival time only covers the schedule lead, jitter lag, and
+    // configured delay. WASAPI endpoint buffering (up to ~200 ms), Bluetooth codec
+    // latency, acoustic travel, and microphone capture latency all push the real
+    // arrival later, so the search window and capture tail carry extra headroom.
+    // The "before" margin stays modest so a previous trial's chirp cannot leak into
+    // the next search window; trials are spaced far enough apart that this holds.
+    private const double SyncCaptureTailSeconds = 0.90;
+    private const double SyncMicSearchBeforeSeconds = 0.50;
+    private const double SyncMicSearchAfterSeconds = 1.10;
+    private const float SyncTestSignalVolume = 0.55f;
 
     /// <summary>
-    /// Renders one short calibration burst to every requested destination, one device
-    /// at a time, while routing is stopped. The burst is generated here (not taken
-    /// from the loopback source), so the user can compare when each speaker reproduces
-    /// it and adjust the per-device delay sliders until the bursts line up.
+    /// Measures the real arrival times of every routed destination plus the loopback
+    /// source, then computes delays that align all destination copies to the latest
+    /// reliable path. Routing must be running: the measurement deliberately uses the
+    /// live ring buffer, output pipelines, configured delays, and buffer profile.
     ///
-    /// This is a manual aid only: it does not measure or correct acoustic latency.
+    /// A linear chirp is mixed into the shared content stream at a known future frame
+    /// for each destination. Only that destination's test gain is open, so the
+    /// microphone records one path at a time. The source chirp is played natively
+    /// through the source endpoint and detected in the same loopback content stream.
+    /// All arrival times are compared against their known content times, so the
+    /// arbitrary microphone recording origin and capture scheduling latency cancel.
     /// </summary>
-    public IReadOnlyList<string> PlayCalibrationImpulse(IReadOnlyList<AudioOutputTarget> targets)
+    public SyncCalibrationRunResult RunAutoSync(
+        IReadOnlyList<AudioOutputTarget> targets,
+        string? referenceDeviceId,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(targets);
+
         if (targets.Count == 0)
         {
-            throw new ArgumentException("At least one output target is required.", nameof(targets));
+            return SyncCalibrationRunResult.Failed(
+                "Auto Sync needs at least one routed destination in addition to the source.");
         }
 
-        var errors = new List<string>();
+        if (!_syncGate.Wait(0))
+        {
+            return SyncCalibrationRunResult.Failed("A synchronization test is already running.");
+        }
 
-        _lifecycle.Wait();
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (Interlocked.CompareExchange(ref _syncCancellation, linkedCancellation, null) is not null)
+        {
+            _syncGate.Release();
+            return SyncCalibrationRunResult.Failed("A synchronization test is already running.");
+        }
+
         try
         {
-            AudioRoutingState state;
+            AudioRingBuffer? ringBuffer;
+            string? sourceDeviceId;
+            string? sourceDeviceName;
+            List<AudioOutputChannel> channels;
+
             lock (_gate)
             {
-                state = _state;
+                ringBuffer = _ringBuffer;
+                sourceDeviceId = _sourceDeviceId;
+                sourceDeviceName = _sourceDeviceName;
+                channels = _channels.Values.ToList();
             }
 
-            if (state is not AudioRoutingState.Stopped)
+            if (_state != AudioRoutingState.Running || ringBuffer is null ||
+                string.IsNullOrWhiteSpace(sourceDeviceId))
             {
-                throw new InvalidOperationException(
-                    "Calibration clicks are only available while routing is stopped.");
+                return SyncCalibrationRunResult.Failed(
+                    "Start routing before running Auto Sync; the measurement must use the live routing path.");
             }
 
+            var channelById = channels.ToDictionary(
+                channel => channel.DeviceId,
+                StringComparer.OrdinalIgnoreCase);
+            var targetsById = new Dictionary<string, AudioOutputTarget>(StringComparer.OrdinalIgnoreCase);
             foreach (var target in targets)
             {
-                try
+                if (!channelById.ContainsKey(target.DeviceId))
                 {
-                    PlayCalibrationImpulse(target);
+                    return SyncCalibrationRunResult.Failed(
+                        $"The destination \"{target.DeviceId}\" is not active in the running session.");
                 }
-                catch (Exception ex)
+
+                targetsById[target.DeviceId] = target;
+            }
+
+            using var microphone = new MicrophoneRecorder();
+            if (!microphone.Start(out var microphoneError))
+            {
+                return SyncCalibrationRunResult.Failed(microphoneError);
+            }
+
+            _syncTestActive = true;
+            var measurements = new List<SyncSpeakerMeasurement>();
+            var startedAt = DateTimeOffset.UtcNow;
+
+            try
+            {
+                // Destinations first. Each destination is drained while muted before it
+                // is opened, so delayed copies of earlier test chirps cannot leak into
+                // this measurement window.
+                foreach (var target in targets)
                 {
-                    errors.Add($"Calibration click on \"{target.DeviceId}\" failed: {ex.Message}");
+                    linkedCancellation.Token.ThrowIfCancellationRequested();
+                    EnsureSyncSession(ringBuffer, sourceDeviceId, channelById, target.DeviceId);
+
+                    var channel = channelById[target.DeviceId];
+                    var configuredDelay = channel.DelayMilliseconds;
+                    var baseLatency = channel.BaseLatencyMilliseconds;
+
+                    SetTestGains(channelById.Values, activeDeviceId: null);
+                    DrainPipeline(channel, linkedCancellation.Token);
+                    EnsureSyncSession(ringBuffer, sourceDeviceId, channelById, target.DeviceId);
+
+                    SetTestGains(channelById.Values, target.DeviceId);
+                    WaitForMilliseconds(80, linkedCancellation.Token);
+
+                    var trials = MeasureDestinationTrials(
+                        ringBuffer,
+                        microphone,
+                        channel,
+                        configuredDelay,
+                        baseLatency,
+                        linkedCancellation.Token);
+                    var summary = SyncCalibrationMath.SummarizeTrials(trials);
+
+                    measurements.Add(new SyncSpeakerMeasurement(
+                        channel.DeviceId,
+                        channel.DeviceName,
+                        IsSource: false,
+                        configuredDelay,
+                        summary.ArrivalOffsetMilliseconds,
+                        summary.ConfidencePercent,
+                        summary.Reliable,
+                        summary.FailureReason));
+
+                    // Keep the destination muted again before the next one is opened.
+                    SetTestGains(channelById.Values, activeDeviceId: null);
                 }
+
+                // Source last. All destination test gains stay closed, so the microphone
+                // hears only the native source playback.
+                linkedCancellation.Token.ThrowIfCancellationRequested();
+                SetTestGains(channelById.Values, activeDeviceId: null);
+                DrainAllPipelines(channelById.Values, linkedCancellation.Token);
+                EnsureSyncSession(ringBuffer, sourceDeviceId, channelById, requiredDeviceId: null);
+
+                var sourceTrials = MeasureSourceTrials(
+                    ringBuffer,
+                    microphone,
+                    sourceDeviceId,
+                    linkedCancellation.Token);
+                var sourceSummary = SyncCalibrationMath.SummarizeTrials(sourceTrials);
+
+                measurements.Insert(0, new SyncSpeakerMeasurement(
+                    sourceDeviceId,
+                    sourceDeviceName ?? "Loopback source",
+                    IsSource: true,
+                    ConfiguredDelayMilliseconds: 0,
+                    sourceSummary.ArrivalOffsetMilliseconds,
+                    sourceSummary.ConfidencePercent,
+                    sourceSummary.Reliable,
+                    sourceSummary.FailureReason));
+
+                // Let the last source chirp leave every destination pipeline while the
+                // test gains are closed. Otherwise restoring gains could reveal a late
+                // chirp after calibration has finished.
+                DrainAllPipelines(channelById.Values, linkedCancellation.Token);
+
+                var plan = SyncCalibrationMath.Plan(measurements, referenceDeviceId);
+                return new SyncCalibrationRunResult(
+                    plan.Success,
+                    plan.Message,
+                    plan,
+                    measurements,
+                    startedAt);
+            }
+            catch (OperationCanceledException)
+            {
+                return SyncCalibrationRunResult.Failed(
+                    "Auto Sync was cancelled. No delays were changed.");
+            }
+            catch (Exception ex)
+            {
+                return SyncCalibrationRunResult.Failed(
+                    $"Auto Sync failed before a complete measurement was available: {ex.Message}");
+            }
+            finally
+            {
+                _syncTestActive = false;
+                RestoreTestGains(channelById.Values);
+                microphone.Stop();
             }
         }
         finally
         {
-            _lifecycle.Release();
+            Interlocked.CompareExchange(ref _syncCancellation, null, linkedCancellation);
+            _syncGate.Release();
         }
-
-        return errors;
     }
 
-    private void PlayCalibrationImpulse(AudioOutputTarget target)
+    /// <summary>
+    /// Plays a short burst train natively through the loopback source while routing is
+    /// running. Every destination receives that same signal through the real shared
+    /// ring buffer with its configured delay and buffer profile. The user listens for
+    /// flam/echo and adjusts the per-device delays live; this is a listening aid, not a
+    /// measurement.
+    /// </summary>
+    public void PlayManualSyncTest(CancellationToken cancellationToken)
     {
-        MMDevice? device = null;
-        AudioOutputChannel? channel = null;
-        Task? writer = null;
+        if (!_syncGate.Wait(0))
+        {
+            throw new InvalidOperationException("A synchronization test is already running.");
+        }
+
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (Interlocked.CompareExchange(ref _syncCancellation, linkedCancellation, null) is not null)
+        {
+            _syncGate.Release();
+            throw new InvalidOperationException("A synchronization test is already running.");
+        }
 
         try
         {
-            device = OpenRenderDevice(target.DeviceId);
+            string? sourceDeviceId;
+            List<AudioOutputChannel> channels;
 
-            using var audioClient = device.AudioClient;
-            var targetFormat = AudioFormatHelper.GetTargetOutputFormat(audioClient.MixFormat);
-            var ring = new AudioRingBuffer(targetFormat.SampleRate, TimeSpan.FromSeconds(3));
-            var sampleRate = targetFormat.SampleRate;
-            writer = Task.Run(() => StreamCalibrationContent(ring, sampleRate));
+            lock (_gate)
+            {
+                sourceDeviceId = _sourceDeviceId;
+                channels = _channels.Values.ToList();
+            }
 
-            channel = new AudioOutputChannel(
-                device,
-                ring,
-                targetFormat,
-                BufferProfile.Stable.BaseLatencyMs,
-                BufferProfile.Stable.WasapiLatencyMs,
-                CalibrationImpulseVolume,
-                0,
-                BufferProfile.Stable.DriftWindowMs);
+            if (_state != AudioRoutingState.Running || string.IsNullOrWhiteSpace(sourceDeviceId) ||
+                channels.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Start routing before playing the live sync test.");
+            }
 
-            // The channel owns the device from here on.
-            device = null;
+            _syncTestActive = true;
+            RestoreTestGains(channels);
 
-            channel.Start();
-            Thread.Sleep((int)((CalibrationPrefixSeconds + CalibrationBurstSeconds) * 1000) + 150);
-            channel.Stop();
+            var sampleRate = 48_000;
+            var burstTrain = SyncTestSignal.CreateManualBurstTrain(
+                sampleRate,
+                bursts: 12,
+                intervalSeconds: 0.7);
+
+            EndpointSignalPlayer.Play(
+                sourceDeviceId,
+                burstTrain,
+                sampleRate,
+                SyncTestSignalVolume,
+                linkedCancellation.Token);
         }
         finally
         {
-            try
+            _syncTestActive = false;
+            Interlocked.CompareExchange(ref _syncCancellation, null, linkedCancellation);
+            _syncGate.Release();
+        }
+    }
+
+    /// <summary>Cancels a running Auto Sync or manual sync test. Safe to call from any thread.</summary>
+    public void CancelSyncTest()
+    {
+        try
+        {
+            _syncCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The test finished between the read and the cancel.
+        }
+    }
+
+    private List<SyncTimingTrial> MeasureDestinationTrials(
+        AudioRingBuffer ringBuffer,
+        MicrophoneRecorder microphone,
+        AudioOutputChannel channel,
+        int configuredDelayMilliseconds,
+        int baseLatencyMilliseconds,
+        CancellationToken cancellationToken)
+    {
+        var chirp = SyncTestSignal.CreateChirp(ringBuffer.SampleRate);
+        var leadFrames = (int)Math.Round(ringBuffer.SampleRate * SyncScheduleLeadSeconds);
+        var trials = new List<SyncTimingTrial>(SyncTrialCount);
+
+        for (var trial = 0; trial < SyncTrialCount; trial++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (channel.DelayMilliseconds != configuredDelayMilliseconds ||
+                channel.BaseLatencyMilliseconds != baseLatencyMilliseconds)
             {
-                channel?.Dispose();
-            }
-            catch (Exception)
-            {
-                // Continue with writer/device cleanup.
+                throw new InvalidOperationException(
+                    "The device delay or buffer profile changed during Auto Sync. No delays were changed.");
             }
 
-            try
+            var microphoneStart = microphone.FramesRecorded;
+            var ringStart = ringBuffer.WriteFrameCount;
+            var scheduleFrame = ringStart + leadFrames;
+
+            ringBuffer.ScheduleSignal(scheduleFrame, chirp);
+
+            var expectedSeconds =
+                SyncScheduleLeadSeconds +
+                (configuredDelayMilliseconds + baseLatencyMilliseconds) / 1000.0;
+            var waitMilliseconds =
+                (int)Math.Ceiling(expectedSeconds * 1000.0) +
+                (int)Math.Round(SyncMicSearchAfterSeconds * 1000.0) +
+                250;
+            WaitForMilliseconds(waitMilliseconds, cancellationToken);
+
+            var microphoneEnd = microphone.FramesRecorded;
+            var searchStart = microphoneStart +
+                              Math.Max(
+                                  0,
+                                  (long)Math.Round(
+                                      (expectedSeconds - SyncMicSearchBeforeSeconds) *
+                                      microphone.SampleRate));
+            var searchLength = (int)Math.Round(
+                (SyncMicSearchBeforeSeconds +
+                 SyncMicSearchAfterSeconds +
+                 SyncTestSignal.ChirpSeconds) *
+                microphone.SampleRate);
+
+            var result = FindMicrophoneChirp(
+                microphone,
+                searchStart,
+                searchLength,
+                microphoneEnd,
+                cancellationToken);
+
+            if (!result.Found)
             {
-                device?.Dispose();
-            }
-            catch (Exception)
-            {
-                // The device may already be gone.
+                trials.Add(new SyncTimingTrial(
+                    0,
+                    result.ConfidencePercent,
+                    Found: false,
+                    result.Correlation,
+                    result.PeakToSidelobeRatio,
+                    result.CoherentSignalToNoiseDb));
+                continue;
             }
 
+            var arrivalSeconds =
+                (searchStart + result.LagSeconds * microphone.SampleRate) /
+                microphone.SampleRate;
+            var arrivalOffsetSeconds = arrivalSeconds - scheduleFrame / (double)ringBuffer.SampleRate;
+
+            trials.Add(new SyncTimingTrial(
+                arrivalOffsetSeconds,
+                result.ConfidencePercent,
+                Found: true,
+                result.Correlation,
+                result.PeakToSidelobeRatio,
+                result.CoherentSignalToNoiseDb));
+        }
+
+        return trials;
+    }
+
+    private List<SyncTimingTrial> MeasureSourceTrials(
+        AudioRingBuffer ringBuffer,
+        MicrophoneRecorder microphone,
+        string sourceDeviceId,
+        CancellationToken cancellationToken)
+    {
+        var chirp = SyncTestSignal.CreateChirp(ringBuffer.SampleRate);
+        var trials = new List<SyncTimingTrial>(SyncTrialCount);
+
+        for (var trial = 0; trial < SyncTrialCount; trial++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var microphoneStart = microphone.FramesRecorded;
+            var ringStart = ringBuffer.WriteFrameCount;
+
+            EndpointSignalPlayer.Play(
+                sourceDeviceId,
+                chirp,
+                ringBuffer.SampleRate,
+                SyncTestSignalVolume,
+                cancellationToken);
+
+            WaitForMilliseconds(
+                (int)Math.Round(SyncCaptureTailSeconds * 1000.0),
+                cancellationToken);
+
+            var ringEnd = ringBuffer.WriteFrameCount;
+            var ringFrames = (int)Math.Min(int.MaxValue, ringEnd - ringStart);
+            if (ringFrames <= 0)
+            {
+                trials.Add(new SyncTimingTrial(0, 0, false, 0, 0, 0));
+                continue;
+            }
+
+            var ringSamples = new float[ringFrames * AudioRingBuffer.Channels];
+            if (!ringBuffer.TryCopyFrames(ringStart, ringFrames, ringSamples))
+            {
+                trials.Add(new SyncTimingTrial(0, 0, false, 0, 0, 0));
+                continue;
+            }
+
+            var ringMono = SyncTestSignal.ToMono(ringSamples);
+            var ringResult = SyncSignalAnalyzer.FindChirp(
+                ringMono,
+                ringBuffer.SampleRate,
+                0,
+                ringMono.Length);
+
+            if (!ringResult.Found)
+            {
+                trials.Add(new SyncTimingTrial(
+                    0,
+                    ringResult.ConfidencePercent,
+                    Found: false,
+                    ringResult.Correlation,
+                    ringResult.PeakToSidelobeRatio,
+                    ringResult.CoherentSignalToNoiseDb));
+                continue;
+            }
+
+            var sourceFrame = ringStart +
+                              (long)Math.Round(ringResult.LagSeconds * ringBuffer.SampleRate);
+            var expectedSeconds = (sourceFrame - ringStart) / (double)ringBuffer.SampleRate;
+            var microphoneEnd = microphone.FramesRecorded;
+            var searchStart = microphoneStart +
+                              Math.Max(
+                                  0,
+                                  (long)Math.Round(
+                                      (expectedSeconds - SyncMicSearchBeforeSeconds) *
+                                      microphone.SampleRate));
+            var searchLength = (int)Math.Round(
+                (SyncMicSearchBeforeSeconds +
+                 SyncMicSearchAfterSeconds +
+                 SyncTestSignal.ChirpSeconds) *
+                microphone.SampleRate);
+
+            var microphoneResult = FindMicrophoneChirp(
+                microphone,
+                searchStart,
+                searchLength,
+                microphoneEnd,
+                cancellationToken);
+
+            if (!microphoneResult.Found)
+            {
+                trials.Add(new SyncTimingTrial(
+                    0,
+                    microphoneResult.ConfidencePercent,
+                    Found: false,
+                    microphoneResult.Correlation,
+                    microphoneResult.PeakToSidelobeRatio,
+                    microphoneResult.CoherentSignalToNoiseDb));
+                continue;
+            }
+
+            var arrivalSeconds =
+                (searchStart + microphoneResult.LagSeconds * microphone.SampleRate) /
+                microphone.SampleRate;
+            var arrivalOffsetSeconds = arrivalSeconds - sourceFrame / (double)ringBuffer.SampleRate;
+
+            trials.Add(new SyncTimingTrial(
+                arrivalOffsetSeconds,
+                microphoneResult.ConfidencePercent,
+                Found: true,
+                microphoneResult.Correlation,
+                microphoneResult.PeakToSidelobeRatio,
+                microphoneResult.CoherentSignalToNoiseDb));
+        }
+
+        return trials;
+    }
+
+    private static SyncCorrelationResult FindMicrophoneChirp(
+        MicrophoneRecorder microphone,
+        long searchStartFrame,
+        int searchLengthFrames,
+        long microphoneEndFrame,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var sampleRate = microphone.SampleRate;
+        if (sampleRate <= 0)
+        {
+            return SyncCorrelationResult.Failed("The microphone recording has no sample rate.");
+        }
+
+        var start = (int)Math.Clamp(searchStartFrame, 0, microphoneEndFrame);
+        var end = (int)Math.Clamp(
+            searchStartFrame + searchLengthFrames,
+            start,
+            microphoneEndFrame);
+        var minimumFrames = (int)Math.Round(sampleRate * SyncTestSignal.ChirpSeconds);
+
+        if (end - start < minimumFrames)
+        {
+            return SyncCorrelationResult.Failed(
+                "The microphone did not record a complete test chirp window.");
+        }
+
+        var samples = microphone.SnapshotRange(start, end);
+        var result = SyncSignalAnalyzer.FindChirp(samples, sampleRate, 0, samples.Length);
+        if (!result.Found)
+        {
+            return result;
+        }
+
+        // Return the lag relative to the window start, in seconds, without losing the
+        // sub-sample information the correlator already computed.
+        return result;
+    }
+
+    private void EnsureSyncSession(
+        AudioRingBuffer expectedRing,
+        string expectedSourceDeviceId,
+        IReadOnlyDictionary<string, AudioOutputChannel> expectedChannels,
+        string? requiredDeviceId)
+    {
+        AudioRoutingState state;
+        AudioRingBuffer? ring;
+        string? sourceId;
+        bool channelPresent;
+
+        lock (_gate)
+        {
+            state = _state;
+            ring = _ringBuffer;
+            sourceId = _sourceDeviceId;
+            channelPresent = requiredDeviceId is null ||
+                             (_channels.TryGetValue(requiredDeviceId, out var current) &&
+                              expectedChannels.TryGetValue(requiredDeviceId, out var expected) &&
+                              ReferenceEquals(current, expected));
+        }
+
+        if (state != AudioRoutingState.Running ||
+            !ReferenceEquals(ring, expectedRing) ||
+            !string.Equals(sourceId, expectedSourceDeviceId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Routing stopped or changed during Auto Sync. No delays were changed.");
+        }
+
+        if (!channelPresent)
+        {
+            throw new InvalidOperationException(
+                "A measured speaker disconnected or was rebuilt during Auto Sync. No delays were changed.");
+        }
+    }
+
+    private static void SetTestGains(IEnumerable<AudioOutputChannel> channels, string? activeDeviceId)
+    {
+        foreach (var channel in channels)
+        {
             try
             {
-                writer?.Wait(2_000);
+                channel.TestGain =
+                    activeDeviceId is not null &&
+                    string.Equals(channel.DeviceId, activeDeviceId, StringComparison.OrdinalIgnoreCase)
+                        ? 1f
+                        : 0f;
             }
             catch (Exception)
             {
-                // The stream writer finishing late is harmless; the ring is local.
+                // A channel that was disposed concurrently is handled by the session check.
             }
         }
     }
 
-    private static void StreamCalibrationContent(AudioRingBuffer ring, int sampleRate)
+    private static void RestoreTestGains(IEnumerable<AudioOutputChannel> channels)
     {
-        try
+        foreach (var channel in channels)
         {
-            var prefixFrames = (int)Math.Round(sampleRate * CalibrationPrefixSeconds);
-            var burstFrames = (int)Math.Round(sampleRate * CalibrationBurstSeconds);
-            var tailFrames = (int)Math.Round(sampleRate * CalibrationTailSeconds);
-            var totalFrames = prefixFrames + burstFrames + tailFrames;
-
-            var content = new float[totalFrames * AudioRingBuffer.Channels];
-            var burst = AudioCalibrationTone.CreateBurst(sampleRate, CalibrationBurstSeconds);
-            Buffer.BlockCopy(
-                burst,
-                0,
-                content,
-                prefixFrames * AudioRingBuffer.Channels * sizeof(float),
-                burst.Length * sizeof(float));
-
-            var blockFrames = (int)Math.Round(sampleRate * AudioCalibrationTone.BlockSeconds);
-            if (blockFrames <= 0 || prefixFrames % blockFrames != 0 || burstFrames % blockFrames != 0)
+            try
             {
-                // Fall back to writing the whole clip at once; the jitter buffer will
-                // trim to its target lag and play the tail of the content.
-                ring.Write(content);
-                return;
+                channel.TestGain = 1f;
             }
-
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-            var writtenFrames = 0;
-            while (writtenFrames < totalFrames)
+            catch (Exception)
             {
-                var frames = Math.Min(blockFrames, totalFrames - writtenFrames);
-                ring.Write(content.AsSpan(
-                    writtenFrames * AudioRingBuffer.Channels,
-                    frames * AudioRingBuffer.Channels));
-                writtenFrames += frames;
-
-                var deadlineMilliseconds = writtenFrames * 1000.0 / sampleRate;
-                while (stopwatch.Elapsed.TotalMilliseconds + 2 < deadlineMilliseconds)
-                {
-                    Thread.Sleep(1);
-                }
+                // Cleanup is best-effort; a disposed channel cannot produce audio.
             }
         }
-        catch (Exception)
+    }
+
+    private static void DrainPipeline(AudioOutputChannel channel, CancellationToken cancellationToken)
+    {
+        var waitMilliseconds =
+            channel.BaseLatencyMilliseconds +
+            channel.DelayMilliseconds +
+            500;
+        WaitForMilliseconds(waitMilliseconds, cancellationToken);
+    }
+
+    private static void DrainAllPipelines(
+        IEnumerable<AudioOutputChannel> channels,
+        CancellationToken cancellationToken)
+    {
+        var maximum = 0;
+        foreach (var channel in channels)
         {
-            // A failed calibration stream only means no click; never crash the engine.
+            maximum = Math.Max(
+                maximum,
+                channel.BaseLatencyMilliseconds + channel.DelayMilliseconds);
+        }
+
+        WaitForMilliseconds(maximum + 500, cancellationToken);
+    }
+
+    private static void WaitForMilliseconds(int milliseconds, CancellationToken cancellationToken)
+    {
+        if (milliseconds <= 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return;
+        }
+
+        if (cancellationToken.WaitHandle.WaitOne(milliseconds))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
         }
     }
 

@@ -1,79 +1,15 @@
-# Visual Studio / .NET
+# Build output
 bin/
 obj/
-out/
-[Dd]ebug/
-[Rr]elease/
-x64/
-x86/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
-bld/
-[Ll]og/
-[Ll]ogs/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
-*.userprefs
-*.slnx.user
-
-# Build results
-[Dd]ebugPublic/
-[Rr]eleasePublic/
-*.cache
-*.binlog
-*.tlog
-
-# Visual Studio
-.vs/
-*.vspscc
-*.vssscc
-*.csproj.user
-*.vbproj.user
-*.fsproj.user
-*.launchSettings.json
-
-# Rider / other IDEs
-.idea/
-*.DotSettings.user
-
-# NuGet
-*.nupkg
-*.snupkg
-.nuget/
-packages/
-project.lock.json
-
-# Test / coverage
-[Tt]est[Rr]esult*/
-*.trx
-*.coverage
-*.coveragexml
-coverage*.json
-coverage*.xml
-coverage*.info
-
-# OS files
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-.DS_Store
-
-# Logs and temp
-*.log
-*.tmp
-*.temp
-*.bak
-*.orig
-
-# Publish output
 publish/
-PublishProfiles/
-*.pubxml.user
+.publish-staging/
 
-# Local settings / machine-specific
-appsettings.*.local.json
-secrets.json
-*.local.*
+# User/machine state
+.headroom/
+
+# OS noise
+Thumbs.db
+Desktop.ini
+
+# Local archives
+*.zip

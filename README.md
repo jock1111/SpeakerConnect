@@ -20,11 +20,11 @@ Speaker Connect captures the WASAPI loopback mix of one selected playback endpoi
 
 *Start/Stop routing buttons sit above the group master-volume slider and mute button. Windows keyboard keys and the taskbar slider drive the same logical volume.*
 
-### Synchronization calibration
+### Synchronization
 
-![Synchronization calibration](assets/speaker-connect-sync-calibration.png)
+![Synchronization](assets/speaker-connect-sync.png)
 
-*The calibration expander plays a short burst through each selected destination, one at a time, so you can align them by ear with the per-device delay controls. Delays are saved automatically and restored after a restart or reconnect.*
+*The synchronization expander offers Auto Sync (microphone-assisted chirp measurement), a live Manual Sync burst test, a reference-speaker selector, per-device delay and measured-offset status, Reset Sync, and Save Calibration.*
 
 ### Smart Volume Balance
 
@@ -37,7 +37,7 @@ Speaker Connect captures the WASAPI loopback mix of one selected playback endpoi
 - **Up to 5 audible endpoints** — one loopback source plus up to four additional outputs (wired, Bluetooth, USB, or virtual devices).
 - **Windows master-volume integration** — keyboard volume keys, the taskbar slider, and mute/unmute drive the whole group through one logical master volume, with smooth gain ramps (no pops) and per-device trims preserved.
 - **Smart Volume Balance** — microphone-based relative loudness matching. Short pink-noise bursts are played through one speaker at a time; attenuation-only corrections are computed, applied live, and persisted per endpoint so speakers reconnect with their balance intact.
-- **Synchronization aids** — per-device delay (0–2000 ms), a manual calibration-click workflow to align destinations by ear, and a reference-speaker mode.
+- **Synchronization** — microphone-assisted **Auto Sync** (linear chirp + normalized cross-correlation on the live routing path), a live **Manual Sync** burst train for aligning by ear, per-device delay (0–2000 ms UI), measured per-speaker offsets relative to the acoustic anchor, honest confidence/failure reporting, and Reset / Save Calibration.
 - **Automatic settings restore** — per-device delay, individual volume, output-group membership, loopback source, sync reference, and Smart Volume Balance calibration are saved automatically by persistent endpoint id and restored after a restart or reconnect.
 - **Latency profiles** — Low latency / Balanced / Stable presets controlling the software jitter buffer and WASAPI render buffer, plus automatic stability fallback that rebuilds a starving destination with a more robust profile.
 - **Live diagnostics** — per-destination buffer depth, underruns, dropped frames, drift corrections, and estimated *software* routing latency.
@@ -78,14 +78,31 @@ The app is **not digitally signed**. Windows SmartScreen may show a warning for 
 
 ## Synchronization and calibration
 
-Loopback copies always lag the original source by the capture/render buffer latency — exact alignment with the source is impossible, but the copies can be aligned with **each other**:
+Loopback copies always lag the original source by the capture/render buffer latency — exact alignment with the source is impossible, but the copies can be aligned with **each other**. Routing must be running for both sync tools.
 
-1. Start routing and play audio.
-2. Open **Synchronization calibration** and click **Play calibration clicks** — a short burst plays through each selected destination, one at a time.
-3. Delay the device that sounds *first* in small steps (10–50 ms) until the bursts line up.
-4. The delay is saved automatically by persistent endpoint id and restored on the next launch or when that speaker reconnects. The legacy delay-only `%LOCALAPPDATA%\SpeakerConnect\sync-offsets.json` file is imported once into the new settings file.
+### Auto Sync
 
-A **reference speaker** mode lets you pick one destination as the alignment target. Bluetooth destinations may need larger manual delays and can still drift because codec latency is variable and unmeasurable.
+1. Start routing and keep ambient noise low. Position a microphone (the Windows default recording device) where it can hear all speakers.
+2. Open **Synchronization**, optionally pick a **reference speaker**, and click **Auto Sync**.
+3. For each destination the app injects a short linear chirp into the shared audio stream at a known content time and unmutes only that speaker (via a ramped test gain), so the microphone records one path at a time. The loopback source is then measured by playing the chirp natively through its endpoint and detecting it in the capture stream.
+4. Arrival times are compared against the known content times; the arbitrary microphone/capture origin cancels, so only **relative** differences between speakers are used. Delays are computed to align every destination to the latest reliable measured path (the *acoustic anchor*, shown as `0 ms reference`; negative offsets mean a speaker sounded earlier).
+5. A successful plan is applied and persisted immediately, so delays and measurement metadata survive reconnect and restart. **Save Calibration** additionally stores the current delays together with the measured offset, confidence, method, and timestamp.
+
+Measured offsets are **relative to the anchor, not absolute hardware latency** — the correlation offset shares an arbitrary recording origin, so the app never presents it as a physical latency figure. If any destination cannot be measured reliably (low confidence, drift between trials, or no chirp found), the whole plan is rejected and no delays change; the manual test remains available. An unreliable source is reported separately and does not block aligning the destinations with each other.
+
+### Manual Sync
+
+**Manual Sync** plays a train of short bursts natively through the loopback source while routing continues, so every destination receives the same signal through the real delayed path. Listen for flam/echo and adjust the per-device delay sliders by ear; the sliders stay editable during the test. This is a listening aid, not a measurement.
+
+### Source limitation
+
+The loopback source is rendered directly by Windows and **cannot be delayed by the app**. If Auto Sync finds the source is earlier than the acoustic anchor, it reports the deficit and explains that the fix is to choose a later speaker as the source (or use a virtual-endpoint architecture) — it never suggests delaying an already-late speaker as a fix.
+
+### Reset
+
+**Reset Sync** clears all configured delays and measured timing metadata but keeps the manual reference selection.
+
+Bluetooth destinations may need larger delays and can still drift because codec latency is variable and only partially measurable; Auto Sync widens its search windows for endpoint/WASAPI latency but cannot guarantee a stable result on every Bluetooth link.
 
 ## Smart Volume Balance
 
@@ -107,7 +124,7 @@ Speaker Connect saves settings automatically; there is no separate "Save setting
 
 `device-settings.json` stores:
 
-- **Per endpoint id** — manual synchronization delay (clamped to 0–5000 ms; the UI exposes 0–2000 ms), individual speaker volume percentage (clamped to 0–100%), and whether that endpoint is in the selected output group.
+- **Per endpoint id** — manual synchronization delay (clamped to 0–5000 ms; the UI exposes 0–2000 ms), individual speaker volume percentage (clamped to 0–100%), whether that endpoint is in the selected output group, and optional Auto Sync measurement metadata (relative offset in ms, confidence percent, method string, and measurement timestamp).
 - **Globally** — the selected loopback source endpoint id and the selected synchronization reference endpoint id.
 
 Updates are per field and per device. Changing one speaker never rewrites another speaker's entry, and a currently disconnected endpoint keeps its saved entry. If a saved source or reference is absent, the application falls back to a usable connected device without deleting the saved id; the saved choice returns when that endpoint reconnects. The source, reference, and group are restored on the next launch.
@@ -169,11 +186,11 @@ The harness also covers per-endpoint settings persistence: restart/reconnect rec
 Current verification on the development machine:
 
 - `dotnet build SpeakerConnect.slnx -c Release` — **0 warnings, 0 errors**.
-- Hardware-independent diagnostics — **20/20 pass** (also runs in CI).
-- Muted hardware diagnostics — **24/24 pass**.
-- Two-target loopback signal diagnostics — **26/26 pass** (20 logic + 4 muted hardware + 2 signal). Master-volume scaling measured 0.505/0.500; a 0.25 balance gain attenuated only its own destination (ratio 0.263) while the other stayed at unity (1.000).
+- Hardware-independent diagnostics — **25/25 pass** (also runs in CI).
+- Muted hardware diagnostics — **29/29 pass** (25 logic + 4 hardware).
+- End-to-end loopback signal diagnostics — **31/31 pass** (25 logic + 4 hardware + 2 signal). Master-volume scaling measured 0.500/0.541; a 0.25 balance gain attenuated only its own destination (ratio 0.250) while the other stayed at unity (1.000).
 
-Audible playback, real-microphone balance calibration, and long Bluetooth sessions were **not** verified; these require a listening environment and physical hardware.
+The signal test unmutes the endpoints it needs and restores their volume/mute afterward. Auto Sync's microphone-assisted measurement was exercised live on the development machine: with no working microphone signal the run correctly **failed closed** (no chirp identified → no delays changed) instead of inventing measurements. A successful acoustic Auto Sync measurement, real-room alignment, and long Bluetooth sessions were **not** verified; these require a listening environment, a working microphone, and physical speakers.
 
 ## Project structure
 
@@ -200,7 +217,9 @@ WASAPI loopback capture (source mix)
 
 - **Loopback is a tap, not a router.** Windows apps still choose their own output endpoint; this app mirrors the *mix* playing on the source endpoint. It cannot route individual applications independently — that requires a virtual audio driver (see the "virtual endpoint architecture" note in the docs/README history).
 - **The source always plays** and cannot be delayed or muted by this app. Copies lag it by at least the buffer latency.
-- **Bluetooth latency is unknown and variable.** Codec/transport delay is not measurable through WASAPI; use the delay controls and calibration clicks, and expect imperfect sync on Bluetooth destinations.
+- **Bluetooth latency is unknown and variable.** Codec/transport delay is not fully measurable through WASAPI; Auto Sync widens its correlation windows for endpoint latency but cannot guarantee a stable result on every Bluetooth link, and drift remains possible.
+- **Auto Sync measures relative timing only.** Reported offsets are differences between speakers against the acoustic anchor; absolute hardware latency is unknown and never displayed.
+- **Auto Sync needs a working microphone.** If the default recording device is muted, too far away, or too noisy, the run fails closed and manual sync remains available.
 - **No sample-accurate sync.** Drift correction inserts/sheds small amounts of audio; it is a jitter-buffer policy, not a hardware-clock lock.
 - **Smart Volume Balance is relative, not absolute SPL**, and the source-endpoint volume cap described above applies when the source is the Windows default device.
 - **Shared-mode WASAPI only.** Exclusive-mode endpoints, protected content, and some driver formats may fail; failures are reported per device.
@@ -213,6 +232,8 @@ WASAPI loopback capture (source mix)
 - **No audio on a destination** — confirm Windows isn't muting that endpoint and that its format is PCM/float (the app falls back automatically for most formats).
 - **Volume keys don't change routed audio** — the app mirrors the *default* render endpoint's volume; if your source isn't the Windows default, change volume in-app or set the source as default.
 - **Balance calibration fails** — check the default recording device is your intended microphone, stop other audio, and reduce background noise.
+- **Auto Sync reports "could not be measured reliably"** — confirm the default recording device is a real microphone (not muted), move it closer to the speakers, reduce background noise, and retry; use Manual Sync to align by ear instead.
+- **Auto Sync says the source is earlier than the anchor** — the source endpoint cannot be delayed by the app; choose a later speaker as the loopback source or align the destinations to each other.
 - **Second instance won't start** — Speaker Connect uses a single-instance guard to prevent feedback loops.
 - **Settings didn't return after restart** — confirm `%LOCALAPPDATA%\SpeakerConnect\device-settings.json` exists and is writable. A corrupt file is renamed with a `.corrupt-<timestamp>` suffix and the app starts with safe defaults.
 

@@ -224,6 +224,12 @@
                                                TextWrapping="Wrap"
                                                Margin="0,3,0,0"
                                                Visibility="{Binding HasSoftwareStatus, Converter={StaticResource BoolToVisibility}}" />
+                                    <TextBlock Text="{Binding SyncMeasurementText}"
+                                               FontSize="11"
+                                               Foreground="#6B4F1D"
+                                               TextWrapping="Wrap"
+                                               Margin="0,3,0,0"
+                                               Visibility="{Binding HasSyncMeasurement, Converter={StaticResource BoolToVisibility}}" />
                                     <Button Grid.RowSpan="2"
                                             Content="Ref"
                                             Command="{Binding DataContext.SetReferenceCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
@@ -271,7 +277,7 @@
                                             SmallChange="5"
                                             LargeChange="50"
                                             Value="{Binding DelayMilliseconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                            IsEnabled="{Binding IsControlEnabled}"
+                                            IsEnabled="{Binding CanAdjustDelay}"
                                             Margin="0,2,0,0" />
                                 </StackPanel>
                             </Grid>
@@ -343,10 +349,10 @@
             </Grid>
         </Border>
 
-        <!-- Synchronization calibration -->
+        <!-- Synchronization: Auto Sync measurement plus a live manual test -->
         <Expander Grid.Row="5" Margin="2,12,2,0" IsExpanded="False">
             <Expander.Header>
-                <TextBlock Text="Synchronization calibration (manual alignment aid)"
+                <TextBlock Text="Synchronization (Auto Sync + live manual test)"
                            FontSize="12"
                            FontWeight="SemiBold"
                            Foreground="#41515C" />
@@ -355,26 +361,109 @@
                 <StackPanel>
                     <TextBlock TextWrapping="Wrap"
                                FontSize="12"
+                               Foreground="#26343E"
+                               Text="{Binding SyncStatus}" />
+
+                    <TextBlock TextWrapping="Wrap"
+                               FontSize="11"
                                Foreground="#41515C"
-                               Text="{Binding CalibrationStatus}" />
-                    <TextBlock TextWrapping="Wrap"
-                               FontSize="11"
-                               Foreground="#7A8790"
-                               Margin="0,8,0,0"
-                               Text="{Binding ReferenceSummary}" />
-                    <TextBlock TextWrapping="Wrap"
-                               FontSize="11"
-                               Foreground="#7A8790"
-                               Margin="0,8,0,0"
-                               Text="Bluetooth codec and hardware delay are not measurable by this app. The clicks only help you find a delay that sounds aligned on your equipment; 0 ms added delay does NOT mean 0 ms hardware latency. Saved per-device delays are restored automatically on the next launch." />
+                               Margin="0,6,0,0"
+                               Text="{Binding SyncDetail}"
+                               Visibility="{Binding HasSyncDetail, Converter={StaticResource BoolToVisibility}}" />
+
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="260" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Text="Manual reference"
+                                   FontSize="11"
+                                   Foreground="#5A6873"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,10,0" />
+
+                        <ComboBox Grid.Column="1"
+                                  ItemsSource="{Binding SyncReferenceCandidates}"
+                                  SelectedItem="{Binding ReferenceDevice, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName"
+                                  IsEnabled="{Binding IsSyncControlsEnabled}"
+                                  Padding="8,6"
+                                  VerticalAlignment="Center"
+                                  ToolTip="Speaker used as the audible comparison point during the manual test" />
+
+                        <TextBlock Grid.Column="2"
+                                   Text="{Binding ReferenceSummary}"
+                                   FontSize="11"
+                                   Foreground="#7A8790"
+                                   TextWrapping="Wrap"
+                                   Margin="18,0,0,0"
+                                   VerticalAlignment="Center" />
+                    </Grid>
+
                     <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                        <Button Content="Play calibration clicks"
-                                Command="{Binding PlayCalibrationClicksCommand}"
-                                IsEnabled="{Binding IsConfigurationEnabled}"
-                                ToolTip="Plays the reference speaker first, then each other speaker so you can align them by ear" />
-                        <Button Content="Clear saved offsets"
-                                Command="{Binding ClearSavedOffsetsCommand}" />
+                        <Button Content="Auto Sync"
+                                Command="{Binding AutoSyncCommand}"
+                                ToolTip="Measures every routed destination and the source with a microphone chirp, then applies and saves delays. Routing must be running." />
+                        <Button Content="Manual Sync"
+                                Command="{Binding ManualSyncCommand}"
+                                ToolTip="Plays a burst train through the real loopback/delay path so you can align speakers by ear. Delay sliders stay live during the test." />
+                        <Button Content="Cancel"
+                                Command="{Binding CancelSyncCommand}"
+                                ToolTip="Cancels Auto Sync or the manual test without applying a partial result" />
+                        <Button Content="Reset Sync"
+                                Command="{Binding ResetSyncCommand}"
+                                ToolTip="Clears every configured delay and saved acoustic timing result" />
+                        <Button Content="Save Calibration"
+                                Command="{Binding SaveSyncCommand}"
+                                ToolTip="Persists the current delays and any acoustic measurement metadata by endpoint id" />
                     </StackPanel>
+
+                    <ItemsControl ItemsSource="{Binding Devices}" Margin="0,10,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="210" />
+                                        <ColumnDefinition Width="90" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               FontSize="12"
+                                               Foreground="#26343E"
+                                               TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Top" />
+
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding DelayText}"
+                                               FontSize="11"
+                                               Foreground="#5A6873"
+                                               VerticalAlignment="Top" />
+
+                                    <TextBlock Grid.Column="2"
+                                               Text="{Binding SyncMeasurementDisplay}"
+                                               FontSize="11"
+                                               Foreground="#41515C"
+                                               TextWrapping="Wrap"
+                                               VerticalAlignment="Top" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBlock Text="{Binding SyncSourceLimitNote}"
+                               FontSize="11"
+                               Foreground="#7A8790"
+                               TextWrapping="Wrap"
+                               Margin="0,10,0,0" />
+
+                    <TextBlock Text="Auto Sync uses a linear chirp and normalized cross-correlation on the live routing path. Measured offsets are relative to the acoustic anchor (0 ms reference); absolute hardware latency is not known and only relative differences are calibrated. It reports measured acoustic arrival timing separately from software buffer estimates. If any routed destination cannot be measured reliably, the whole Auto Sync plan is rejected and no delays are changed; the manual test remains available. Bluetooth codec latency and clock drift are real physical effects and are not guaranteed to stay constant."
+                               FontSize="10"
+                               Foreground="#7A8790"
+                               TextWrapping="Wrap"
+                               Margin="0,8,0,0" />
                 </StackPanel>
             </Border>
         </Expander>
