@@ -6,10 +6,12 @@ namespace SpeakerConnect.Audio;
 
 /// <summary>
 /// Enumerates active Windows render (output) endpoints through MMDeviceEnumerator/WASAPI.
+/// The method is virtual so diagnostics can substitute a deterministic device list
+/// without touching real hardware.
 /// </summary>
-public sealed class AudioDeviceEnumerator
+public class AudioDeviceEnumerator
 {
-    public IReadOnlyList<AudioDeviceInfo> GetActiveRenderDevices()
+    public virtual IReadOnlyList<AudioDeviceInfo> GetActiveRenderDevices()
     {
         var devices = new List<AudioDeviceInfo>();
 

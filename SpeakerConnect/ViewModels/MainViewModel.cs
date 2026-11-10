@@ -17,8 +17,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer _statusTimer;
     private readonly Dictionary<string, string> _channelErrors =
         new(StringComparer.OrdinalIgnoreCase);
-    private readonly SyncOffsetStore _syncOffsetStore = new();
-    private readonly VolumeBalanceStore _balanceStore = new();
+    private readonly DeviceSettingsStore _deviceSettingsStore;
+    private readonly VolumeBalanceStore _balanceStore;
 
     private DeviceViewModel? _sourceDevice;
     private bool _isRunning;
@@ -44,9 +44,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private CancellationTokenSource? _calibrationCancellation;
 
     public MainViewModel()
+        : this(new AudioDeviceEnumerator(), new DeviceSettingsStore(), new VolumeBalanceStore())
+    {
+    }
+
+    internal MainViewModel(
+        AudioDeviceEnumerator deviceEnumerator,
+        DeviceSettingsStore deviceSettingsStore,
+        VolumeBalanceStore balanceStore)
     {
         _dispatcher = Dispatcher.CurrentDispatcher;
-        _deviceEnumerator = new AudioDeviceEnumerator();
+        _deviceEnumerator = deviceEnumerator ?? throw new ArgumentNullException(nameof(deviceEnumerator));
+        _deviceSettingsStore = deviceSettingsStore ?? throw new ArgumentNullException(nameof(deviceSettingsStore));
+        _balanceStore = balanceStore ?? throw new ArgumentNullException(nameof(balanceStore));
         _deviceWatcher = new AudioDeviceWatcher();
         _routingEngine = new AudioRoutingEngine(_deviceEnumerator, _deviceWatcher);
 
@@ -309,6 +319,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     value.IsReference = true;
                 }
 
+                if (!_suppressSelectionHandling)
+                {
+                    _deviceSettingsStore.SaveReferenceDevice(value?.Id);
+                }
+
                 OnPropertyChanged(nameof(HasReferenceDevice));
                 OnPropertyChanged(nameof(ReferenceSummary));
                 NotifyCommands();
@@ -349,6 +364,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             finally
             {
                 _suppressSelectionHandling = previousSuppression;
+            }
+
+            if (!_suppressSelectionHandling)
+            {
+                _deviceSettingsStore.SaveSourceDevice(value?.Id);
+
+                if (value is not null)
+                {
+                    // The source cannot also be a routed destination.
+                    _deviceSettingsStore.SaveSelection(value.Id, false);
+                }
+            }
+
+            // A reference can only be a destination, so it stops being the
+            // reference when the same endpoint becomes the loopback source.
+            if (value is not null && ReferenceEquals(value, _referenceDevice))
+            {
+                ReferenceDevice = null;
             }
 
             OnPropertyChanged(nameof(SourceSummary));
@@ -472,6 +505,16 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         _deviceWatcher.Dispose();
+
+        try
+        {
+            _deviceSettingsStore.Dispose();
+        }
+        catch (Exception)
+        {
+            // Settings flushing is best-effort during shutdown.
+        }
+
         GC.SuppressFinalize(this);
     }
 
@@ -591,6 +634,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             _channelErrors.Clear();
             RefreshDevices();
+            _deviceSettingsStore.Flush();
             StatusMessage = "Routing stopped. The source device continues its normal Windows playback.";
             NotifyCommands();
         }
@@ -618,9 +662,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         var previousById = Devices.ToDictionary(device => device.Id, StringComparer.OrdinalIgnoreCase);
         var previousSourceId = SourceDevice?.Id;
-        var selectedIds = new HashSet<string>(
-            Devices.Where(device => device.IsSelected).Select(device => device.Id),
-            StringComparer.OrdinalIgnoreCase);
+        var savedSettings = _deviceSettingsStore.GetSnapshot();
         var savedBalanceGains = _balanceStore.GetSnapshot();
 
         foreach (var device in Devices)
@@ -638,27 +680,49 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             foreach (var info in discoveredDevices)
             {
                 var row = new DeviceViewModel(info);
-                if (previousById.TryGetValue(info.Id, out var previous))
+                if (previousById.TryGetValue(info.Id, out var previous) && previous is not null)
                 {
                     row.Volume = previous.Volume;
                     row.DelayMilliseconds = previous.DelayMilliseconds;
                     row.BalanceGainPercent = previous.BalanceGainPercent;
                 }
-                else if (savedBalanceGains.TryGetValue(info.Id, out var savedBalance))
+                else
                 {
-                    // A reconnected endpoint recovers its persistent calibration.
-                    row.BalanceGainPercent = savedBalance * 100.0;
-                    _routingEngine.SetBalanceGain(info.Id, savedBalance);
+                    // A reconnecting endpoint recovers the last saved values. The
+                    // constructor defaults are used only when nothing was saved, so
+                    // a disconnected device's file entry is never overwritten here.
+                    if (savedSettings.TryGetValue(info.Id, out var saved))
+                    {
+                        if (saved.VolumePercent is double savedVolume)
+                        {
+                            row.Volume = savedVolume;
+                        }
+
+                        if (saved.DelayMilliseconds is int savedDelay)
+                        {
+                            row.DelayMilliseconds = savedDelay;
+                        }
+                    }
+
+                    if (savedBalanceGains.TryGetValue(info.Id, out var savedBalance))
+                    {
+                        row.BalanceGainPercent = savedBalance * 100.0;
+                        _routingEngine.SetBalanceGain(info.Id, savedBalance);
+                    }
                 }
 
                 row.PropertyChanged += OnDevicePropertyChanged;
                 Devices.Add(row);
             }
 
-            var newSource = previousSourceId is null
+            // The saved source wins over the previous in-memory fallback. A saved
+            // id that is currently absent stays in the file untouched; the app uses
+            // the Windows default until that endpoint reconnects.
+            var desiredSourceId = _deviceSettingsStore.SourceDeviceId ?? previousSourceId;
+            var newSource = desiredSourceId is null
                 ? null
                 : Devices.FirstOrDefault(device =>
-                    string.Equals(device.Id, previousSourceId, StringComparison.OrdinalIgnoreCase));
+                    string.Equals(device.Id, desiredSourceId, StringComparison.OrdinalIgnoreCase));
 
             newSource ??= Devices.FirstOrDefault(device => device.Device.IsDefault);
             newSource ??= Devices.FirstOrDefault();
@@ -667,9 +731,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             foreach (var device in Devices)
             {
+                var wasSelected = previousById.TryGetValue(device.Id, out var previous)
+                    ? previous.IsSelected
+                    : savedSettings.TryGetValue(device.Id, out var saved) &&
+                      saved.IsSelected == true;
+
                 device.IsSelected =
                     !ReferenceEquals(device, newSource) &&
-                    selectedIds.Contains(device.Id);
+                    wasSelected;
             }
 
             foreach (var extra in Devices
@@ -678,31 +747,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                          .ToList())
             {
                 extra.IsSelected = false;
+
+                // Make the enforced cap durable so an over-cap group is not
+                // restored again on every launch.
+                _deviceSettingsStore.SaveSelection(extra.Id, false);
             }
 
-            // Restore the per-device delay offsets the user saved during the
-            // synchronization calibration workflow.
-            foreach (var device in Devices)
-            {
-                if (_syncOffsetStore.TryGet(device.Id, out var savedOffset))
-                {
-                    device.DelayMilliseconds = savedOffset;
-                }
-            }
-
-            // Restore the sync reference if the previous reference device still exists.
-            if (_referenceDevice is not null)
+            // Restore the sync reference across restarts and reconnects. When the
+            // saved endpoint is absent, keep its id in the file for later.
+            var desiredReferenceId =
+                _referenceDevice?.Id ?? _deviceSettingsStore.ReferenceDeviceId;
+            if (desiredReferenceId is not null)
             {
                 var restoredReference = Devices.FirstOrDefault(device =>
-                    string.Equals(device.Id, _referenceDevice.Id, StringComparison.OrdinalIgnoreCase));
-                if (restoredReference is not null)
-                {
-                    ReferenceDevice = restoredReference;
-                }
-                else
-                {
-                    _referenceDevice = null;
-                }
+                    string.Equals(device.Id, desiredReferenceId, StringComparison.OrdinalIgnoreCase));
+
+                ReferenceDevice = restoredReference is not null && !restoredReference.IsSource
+                    ? restoredReference
+                    : null;
             }
         }
         finally
@@ -756,6 +818,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             device.IsSelected = false;
             _suppressSelectionHandling = false;
 
+            _deviceSettingsStore.SaveSelection(device.Id, false);
+
             StatusMessage = "The loopback source cannot also be a destination.";
             UpdateRowAvailability();
             RaiseSelectionSummaryChanged();
@@ -769,6 +833,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             device.IsSelected = false;
             _suppressSelectionHandling = false;
 
+            _deviceSettingsStore.SaveSelection(device.Id, false);
+
             StatusMessage = $"You can route to at most {MaxAdditionalOutputs} additional output devices " +
                             $"({MaxTotalAudibleDevices} speakers total, including the source).";
             UpdateRowAvailability();
@@ -776,6 +842,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             NotifyCommands();
             return;
         }
+
+        // Auto-save the group membership so the same outputs are restored after a
+        // restart or when a temporarily disconnected endpoint comes back.
+        _deviceSettingsStore.SaveSelection(device.Id, device.IsSelected);
 
         UpdateRowAvailability();
         RaiseSelectionSummaryChanged();
@@ -795,12 +865,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 OnSelectionChanged(device);
                 break;
 
-            case nameof(DeviceViewModel.Volume) when IsRunning:
-                _routingEngine.UpdateVolume(device.Id, (float)(device.Volume / 100.0));
+            case nameof(DeviceViewModel.Volume):
+                if (IsRunning)
+                {
+                    _routingEngine.UpdateVolume(device.Id, (float)(device.Volume / 100.0));
+                }
+
+                // Volume is persisted even for a device that is currently
+                // disconnected later in the session; its entry stays in the file.
+                _deviceSettingsStore.SaveVolume(device.Id, device.Volume);
                 break;
 
-            case nameof(DeviceViewModel.DelayMilliseconds) when IsRunning:
-                _routingEngine.UpdateDelay(device.Id, device.DelayMilliseconds);
+            case nameof(DeviceViewModel.DelayMilliseconds):
+                if (IsRunning)
+                {
+                    _routingEngine.UpdateDelay(device.Id, device.DelayMilliseconds);
+                }
+
+                _deviceSettingsStore.SaveDelay(device.Id, device.DelayMilliseconds);
                 break;
 
             case nameof(DeviceViewModel.BalanceGainPercent):
@@ -1378,17 +1460,31 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void ClearSavedOffsets()
     {
+        // Saving the null reference must happen outside the selection suppression.
         ReferenceDevice = null;
 
-        foreach (var device in Devices)
+        var previousSuppression = _suppressSelectionHandling;
+        _suppressSelectionHandling = true;
+
+        try
         {
-            device.IsReference = false;
-            if (device.DelayMilliseconds > 0)
+            foreach (var device in Devices)
             {
-                _syncOffsetStore.Remove(device.Id);
-                device.DelayMilliseconds = 0;
+                device.IsReference = false;
+                _deviceSettingsStore.RemoveDelay(device.Id);
+
+                if (device.DelayMilliseconds > 0)
+                {
+                    device.DelayMilliseconds = 0;
+                }
             }
         }
+        finally
+        {
+            _suppressSelectionHandling = previousSuppression;
+        }
+
+        _deviceSettingsStore.Flush();
 
         CalibrationStatus = "Saved per-device offsets and sync reference were cleared.";
         NotifyCommands();

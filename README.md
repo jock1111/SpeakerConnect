@@ -24,7 +24,7 @@ Speaker Connect captures the WASAPI loopback mix of one selected playback endpoi
 
 ![Synchronization calibration](assets/speaker-connect-sync-calibration.png)
 
-*The calibration expander plays a short burst through each selected destination, one at a time, so you can align them by ear with the per-device delay controls. Saved offsets persist between sessions.*
+*The calibration expander plays a short burst through each selected destination, one at a time, so you can align them by ear with the per-device delay controls. Delays are saved automatically and restored after a restart or reconnect.*
 
 ### Smart Volume Balance
 
@@ -38,6 +38,7 @@ Speaker Connect captures the WASAPI loopback mix of one selected playback endpoi
 - **Windows master-volume integration** — keyboard volume keys, the taskbar slider, and mute/unmute drive the whole group through one logical master volume, with smooth gain ramps (no pops) and per-device trims preserved.
 - **Smart Volume Balance** — microphone-based relative loudness matching. Short pink-noise bursts are played through one speaker at a time; attenuation-only corrections are computed, applied live, and persisted per endpoint so speakers reconnect with their balance intact.
 - **Synchronization aids** — per-device delay (0–2000 ms), a manual calibration-click workflow to align destinations by ear, and a reference-speaker mode.
+- **Automatic settings restore** — per-device delay, individual volume, output-group membership, loopback source, sync reference, and Smart Volume Balance calibration are saved automatically by persistent endpoint id and restored after a restart or reconnect.
 - **Latency profiles** — Low latency / Balanced / Stable presets controlling the software jitter buffer and WASAPI render buffer, plus automatic stability fallback that rebuilds a starving destination with a more robust profile.
 - **Live diagnostics** — per-destination buffer depth, underruns, dropped frames, drift corrections, and estimated *software* routing latency.
 - **Graceful device handling** — endpoint add/remove notifications, per-device failure isolation, and a single-instance guard against feedback loops.
@@ -51,7 +52,7 @@ Speaker Connect captures the WASAPI loopback mix of one selected playback endpoi
 
 ## Install and run
 
-1. Download `SpeakerConnect-win-x64.zip` from the [latest release](../../releases/latest).
+1. Download the `SpeakerConnect-*-win-x64.zip` asset from the [latest release](../../releases/latest).
 2. Extract the ZIP to a folder of your choice (no installer required).
 3. Run `SpeakerConnect.exe`.
 
@@ -82,7 +83,7 @@ Loopback copies always lag the original source by the capture/render buffer late
 1. Start routing and play audio.
 2. Open **Synchronization calibration** and click **Play calibration clicks** — a short burst plays through each selected destination, one at a time.
 3. Delay the device that sounds *first* in small steps (10–50 ms) until the bursts line up.
-4. Save the offsets — they persist in `%LOCALAPPDATA%\SpeakerConnect\sync-offsets.json` and restore on the next launch.
+4. The delay is saved automatically by persistent endpoint id and restored on the next launch or when that speaker reconnects. The legacy delay-only `%LOCALAPPDATA%\SpeakerConnect\sync-offsets.json` file is imported once into the new settings file.
 
 A **reference speaker** mode lets you pick one destination as the alignment target. Bluetooth destinations may need larger manual delays and can still drift because codec latency is variable and unmeasurable.
 
@@ -94,11 +95,30 @@ Makes all speakers sound approximately equally loud:
 2. Open **Smart Volume Balance**, check **Enable automatic balance**, position a microphone at your listening position, and click **Calibrate Volume**.
 3. The app plays ~1.5 s of band-limited pink noise through each speaker, one at a time, and measures each level. Noisy measurements are rejected.
 4. Corrections are **attenuation-only** — the quietest speaker sets the target and louder speakers are turned down, never boosted, so nothing clips.
-5. Results apply immediately, save by persistent endpoint ID, and restore after restart/reconnect. Per-speaker sliders allow manual trims; **Save Calibration** persists them, **Reset Calibration** clears all corrections.
+5. Results apply immediately, save by persistent endpoint ID, and restore after restart/reconnect. Per-speaker sliders allow manual trims; **Save Calibration** saves them alongside existing endpoint gains (including temporarily disconnected speakers), and **Reset Calibration** clears all corrections.
 
 **How it works under the hood:** destination corrections are software gains in the audio pipeline. The *source* speaker is special — loopback capture happens before Windows endpoint volume, so its correction is applied by lowering its endpoint volume while routing is active. If the source is also the Windows default endpoint, that attenuation becomes the maximum reachable taskbar/keyboard slider position; the app re-caps the endpoint above it to preserve balance. Stop routing or disable balance to restore the full Windows range.
 
 > Calibration measures **relative** loudness only — the microphone is not calibrated for absolute SPL, and results depend on mic placement and room noise. Re-run after moving speakers.
+
+## Saved settings
+
+Speaker Connect saves settings automatically; there is no separate "Save settings" button. Files live under `%LOCALAPPDATA%\SpeakerConnect\` and are keyed by the persistent Windows MMDevice endpoint id, so the same physical speaker or headset recovers its values after a restart or a temporary disconnect/reconnect.
+
+`device-settings.json` stores:
+
+- **Per endpoint id** — manual synchronization delay (clamped to 0–5000 ms; the UI exposes 0–2000 ms), individual speaker volume percentage (clamped to 0–100%), and whether that endpoint is in the selected output group.
+- **Globally** — the selected loopback source endpoint id and the selected synchronization reference endpoint id.
+
+Updates are per field and per device. Changing one speaker never rewrites another speaker's entry, and a currently disconnected endpoint keeps its saved entry. If a saved source or reference is absent, the application falls back to a usable connected device without deleting the saved id; the saved choice returns when that endpoint reconnects. The source, reference, and group are restored on the next launch.
+
+`volume-balance.json` stores the Smart Volume Balance enabled preference and the attenuation-only gain for each endpoint id. **Save Calibration** merges manual trims with the already-saved gains, so a temporarily disconnected speaker does not lose its calibration. **Reset Calibration** clears the gains but keeps the enabled preference.
+
+Writes are coalesced for 300 ms and flushed when routing stops and when the window closes. Each file is written to a temporary file and swapped into place, so an interrupted write leaves either the previous complete file or the new complete file, never a half-written document. If a settings file is corrupt, it is renamed to `<name>.corrupt-<UTC timestamp>` and the application starts with safe defaults.
+
+The files do **not** store the routing on/off state, the selected buffer profile, or master volume/mute. Master volume and mute continue to follow the Windows endpoint while the application runs.
+
+To check persistence manually, change a speaker's volume and delay, toggle its output checkbox, choose a source and sync reference, then close and reopen the application. The same values should return. Disconnect and reconnect a destination; its saved values should return while the other devices' saved values remain unchanged.
 
 ## Build from source
 
@@ -136,7 +156,7 @@ Hardware tests (muted init, buffer profiles, real endpoint volume notifications,
 dotnet run --project SpeakerConnect.Diagnostics -c Release -- --hardware
 ```
 
-End-to-end loopback signal test (plays a quiet 440 Hz tone through real endpoints):
+End-to-end loopback signal test (plays a quiet 1234 Hz diagnostic tone through real endpoints; the measurement is narrowband so background system audio does not invalidate the gain ratios):
 
 ```powershell
 dotnet run --project SpeakerConnect.Diagnostics -c Release -- --signal
@@ -144,12 +164,23 @@ dotnet run --project SpeakerConnect.Diagnostics -c Release -- --signal
 
 > `--hardware` and `--signal` change the system volume temporarily (restored afterward) and emit test tones. They are not run in CI.
 
+The harness also covers per-endpoint settings persistence: restart/reconnect recovery, preservation of a disconnected endpoint, clamping, atomic writes, corrupt-file backup, one-time legacy `sync-offsets.json` migration, and a fake-enumerator test that drives the real `MainViewModel` through save → restart → disconnect → reconnect. These tests use temporary files and do not touch real endpoints or saved user settings.
+
+Current verification on the development machine:
+
+- `dotnet build SpeakerConnect.slnx -c Release` — **0 warnings, 0 errors**.
+- Hardware-independent diagnostics — **20/20 pass** (also runs in CI).
+- Muted hardware diagnostics — **24/24 pass**.
+- Two-target loopback signal diagnostics — **26/26 pass** (20 logic + 4 muted hardware + 2 signal). Master-volume scaling measured 0.505/0.500; a 0.25 balance gain attenuated only its own destination (ratio 0.263) while the other stayed at unity (1.000).
+
+Audible playback, real-microphone balance calibration, and long Bluetooth sessions were **not** verified; these require a listening environment and physical hardware.
+
 ## Project structure
 
 ```text
 SpeakerConnect/                  WPF application
   Audio/                         Capture, routing engine, volume manager, calibration
-  Infrastructure/                MVVM helpers, persistence stores
+  Infrastructure/                MVVM helpers, atomic per-endpoint settings stores
   Models/                        Device and routing models
   ViewModels/                    MainWindow view models
 SpeakerConnect.Diagnostics/      Console diagnostics harness
@@ -183,6 +214,7 @@ WASAPI loopback capture (source mix)
 - **Volume keys don't change routed audio** — the app mirrors the *default* render endpoint's volume; if your source isn't the Windows default, change volume in-app or set the source as default.
 - **Balance calibration fails** — check the default recording device is your intended microphone, stop other audio, and reduce background noise.
 - **Second instance won't start** — Speaker Connect uses a single-instance guard to prevent feedback loops.
+- **Settings didn't return after restart** — confirm `%LOCALAPPDATA%\SpeakerConnect\device-settings.json` exists and is writable. A corrupt file is renamed with a `.corrupt-<timestamp>` suffix and the app starts with safe defaults.
 
 ## License
 

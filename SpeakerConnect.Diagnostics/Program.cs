@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Threading;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -7,6 +9,7 @@ using NAudio.Wave.SampleProviders;
 using SpeakerConnect.Audio;
 using SpeakerConnect.Infrastructure;
 using SpeakerConnect.Models;
+using SpeakerConnect.ViewModels;
 
 var options = DiagnosticsOptions.Parse(args);
 
@@ -17,6 +20,7 @@ Console.WriteLine();
 
 var failures = new List<string>();
 var passed = 0;
+const int DiagnosticToneFrequencyHz = 1_234;
 
 void Run(string name, Action test)
 {
@@ -57,6 +61,8 @@ Run("master volume ramp is smooth under rapid changes", TestMasterVolumeRampSmoo
 Run("volume balance gain math is attenuation-only", TestVolumeBalanceMath);
 Run("volume balance application, trims, mute, and ramps", TestVolumeBalanceApplication);
 Run("volume balance persistence and reconnect by device id", TestVolumeBalanceStore);
+Run("device settings persistence, atomic writes, and legacy migration", TestDeviceSettingsStore);
+Run("view model restores device settings across restart and reconnect", TestViewModelDeviceSettingsPersistence);
 Run("pink-noise calibration signal", TestPinkNoiseSignal);
 
 var devices = new List<AudioDeviceInfo>();
@@ -876,6 +882,15 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
             targets.Select(target => new AudioOutputTarget(target.Id, 0.35f, 0)).ToList()));
         Assert(result.Started, result.Message);
 
+        // Give every destination, especially Bluetooth ones, time to enter its
+        // render loop before measuring. The routing engine starts channels
+        // asynchronously; a slow codec can otherwise still be priming when the
+        // first tone starts, making the first phase artificially quiet.
+        Thread.Sleep(2_000);
+        Assert(
+            engine.GetChannelStatuses().All(status => status.State == AudioChannelState.Playing),
+            "all signal-test destinations must enter Playing before measurement");
+
         // Phase A: master at unity. The Windows endpoint volume is temporarily
         // raised to 1.0 so the group gain is the only variable between phases.
         engine.MasterVolume = 1f;
@@ -901,22 +916,36 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
 
         for (var index = 0; index < captures.Count; index++)
         {
-            var loudRms = loud[index].TrimmedRms;
-            var quietRms = quiet[index].TrimmedRms;
+            var loudRms = loud[index].ToneRms;
+            var quietRms = quiet[index].ToneRms;
             var ratio = loudRms <= 1e-9 ? 0 : quietRms / loudRms;
             Console.WriteLine(
-                $"      {captures[index].Name}: rms at master 1.0 = {loudRms:0.000000}, " +
-                $"at master 0.5 = {quietRms:0.000000}, ratio {ratio:0.000}");
+                $"      {captures[index].Name}: tone RMS at master 1.0 = {loudRms:0.000000} " +
+                $"(mix RMS {loud[index].TrimmedRms:0.000000}, n={loud[index].Count}), " +
+                $"at master 0.5 = {quietRms:0.000000} " +
+                $"(mix RMS {quiet[index].TrimmedRms:0.000000}, n={quiet[index].Count}), ratio {ratio:0.000}");
             Assert(loudRms > 0.0001, $"{captures[index].Name} did not receive the tone");
             Assert(ratio > 0.40f && ratio < 0.60f,
                 $"{captures[index].Name}: master volume did not scale the routed samples " +
                 $"(expected ratio ~0.5, got {ratio:0.000})");
         }
 
-        // Phase C: with master back at unity, an independent balance trim must
+        // Phase C baseline: measure unity again immediately before enabling balance,
+        // so slow endpoint level drift between phases cannot masquerade as a balance
+        // gain change.
+        foreach (var capture in captures)
+        {
+            capture.Reset();
+        }
+
+        engine.BalanceEnabled = false;
+        engine.MasterVolume = 1f;
+        Thread.Sleep(350);
+        var unity = RunTonePhase(captures, sourceDevice, 1_400);
+
+        // Phase C: with master at unity, an independent balance trim must
         // attenuate only its own destination and leave the other unchanged. The
-        // trimmed RMS (middle 50% of the capture window) is used so silence before
-        // and after the tone does not dominate the ratio.
+        // narrowband tone RMS is used so unrelated system audio does not dominate.
         foreach (var capture in captures)
         {
             capture.Reset();
@@ -931,13 +960,13 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
 
         for (var index = 0; index < captures.Count; index++)
         {
-            var baseline = loud[index].TrimmedRms;
-            var balancedRms = balanced[index].TrimmedRms;
+            var baseline = unity[index].ToneRms;
+            var balancedRms = balanced[index].ToneRms;
             var ratio = baseline <= 1e-9 ? 0 : balancedRms / baseline;
             var expected = index == 0 ? 0.25 : 1.0;
             Console.WriteLine(
                 $"      {captures[index].Name}: balance gain {expected:0.00} -> " +
-                $"rms {balancedRms:0.000000} vs {baseline:0.000000}, ratio {ratio:0.000}");
+                $"tone rms {balancedRms:0.000000} vs {baseline:0.000000}, ratio {ratio:0.000}");
             Assert(ratio > expected - 0.15 && ratio < expected + 0.15,
                 $"{captures[index].Name}: routed balance gain was not applied independently " +
                 $"(expected ~{expected:0.00}, got {ratio:0.000})");
@@ -978,7 +1007,7 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
     }
 }
 
-static List<(int Count, double Rms, float Max, double TrimmedRms)> RunTonePhase(
+static List<(int Count, double Rms, float Max, double TrimmedRms, double ToneRms)> RunTonePhase(
     IReadOnlyList<TargetLoopbackCapture> captures,
     MMDevice sourceDevice,
     int toneMilliseconds)
@@ -991,8 +1020,8 @@ static List<(int Count, double Rms, float Max, double TrimmedRms)> RunTonePhase(
     var generator = new SignalGenerator(48000, 2)
     {
         Type = SignalGeneratorType.Sin,
-        Frequency = 440,
-        Gain = 0.04
+        Frequency = DiagnosticToneFrequencyHz,
+        Gain = 0.08
     };
 
     using (var toneOutput = new WasapiOut(sourceDevice, AudioClientShareMode.Shared, true, 100))
@@ -1004,11 +1033,17 @@ static List<(int Count, double Rms, float Max, double TrimmedRms)> RunTonePhase(
     }
 
     Thread.Sleep(250);
-    var results = new List<(int Count, double Rms, float Max, double TrimmedRms)>();
+    var results = new List<(int Count, double Rms, float Max, double TrimmedRms, double ToneRms)>();
     foreach (var capture in captures)
     {
         capture.Stop();
-        results.Add(capture.GetResult());
+        var result = capture.GetResult();
+        results.Add((
+            result.Count,
+            result.Rms,
+            result.Max,
+            result.TrimmedRms,
+            capture.GetToneRms(DiagnosticToneFrequencyHz)));
     }
 
     return results;
@@ -1262,6 +1297,365 @@ static void TestVolumeBalanceStore()
     }
     finally
     {
+        try
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+        catch (Exception)
+        {
+            // Test cleanup is best-effort.
+        }
+    }
+}
+
+static void TestDeviceSettingsStore()
+{
+    var directory = Path.Combine(
+        Path.GetTempPath(),
+        "SpeakerConnect.Diagnostics",
+        Guid.NewGuid().ToString("N"));
+    var path = Path.Combine(directory, DeviceSettingsStore.FileName);
+
+    try
+    {
+        using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(!store.TryGet("device-a", out _), "a new settings store must be empty");
+            Assert(store.ReferenceDeviceId is null && store.SourceDeviceId is null,
+                "a new settings store must not invent a reference or source");
+
+            store.SaveVolume("device-a", 42.5);
+            store.SaveDelay("device-a", 120);
+            store.SaveSelection("device-a", true);
+            store.SaveVolume("device-b", 33);
+            store.SaveReferenceDevice("device-a");
+            store.SaveSourceDevice("device-b");
+        }
+
+        using (var reopened = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(reopened.TryGet("device-a", out var deviceA),
+                "saved device-a must survive a restart");
+            Assert(deviceA.VolumePercent is 42.5 &&
+                   deviceA.DelayMilliseconds is 120 &&
+                   deviceA.IsSelected is true,
+                "volume, delay, and selection must survive a restart");
+            Assert(reopened.TryGet("device-b", out var deviceB) &&
+                   deviceB.VolumePercent is 33,
+                "a second device must survive a restart");
+            Assert(reopened.ReferenceDeviceId == "device-a" &&
+                   reopened.SourceDeviceId == "device-b",
+                "reference and source ids must survive a restart");
+        }
+
+        // Per-device updates must never rewrite other endpoints. device-b is
+        // deliberately not "connected" in this scope.
+        using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            store.SaveVolume("device-a", 10);
+        }
+
+        using (var reopened = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(reopened.TryGet("device-a", out var deviceA) &&
+                   deviceA.VolumePercent is 10,
+                "updating one device must persist its new volume");
+            Assert(reopened.TryGet("device-b", out var deviceB) &&
+                   deviceB.VolumePercent is 33,
+                "updating one device must preserve a disconnected device's volume");
+        }
+
+        // "Clear saved offsets" removes the delay only.
+        using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            store.RemoveDelay("device-a");
+        }
+
+        using (var reopened = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(reopened.TryGet("device-a", out var deviceA) &&
+                   deviceA.DelayMilliseconds is null &&
+                   deviceA.VolumePercent is 10 &&
+                   deviceA.IsSelected is true,
+                "removing a delay must keep the volume and selection for that device");
+        }
+
+        using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            store.SaveVolume("clamped-low", -5);
+            store.SaveVolume("clamped-high", 150);
+            store.SaveDelay("delay-low", -10);
+            store.SaveDelay("delay-high", 9_000);
+        }
+
+        using (var reopened = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(reopened.TryGet("clamped-low", out var low) && low.VolumePercent is 0,
+                "volume below zero must clamp to 0%");
+            Assert(reopened.TryGet("clamped-high", out var high) && high.VolumePercent is 100,
+                "volume above 100 must clamp to 100%");
+            Assert(reopened.TryGet("delay-low", out var delayLow) &&
+                   delayLow.DelayMilliseconds is 0,
+                "negative delay must clamp to 0 ms");
+            Assert(reopened.TryGet("delay-high", out var delayHigh) &&
+                   delayHigh.DelayMilliseconds is 5_000,
+                "delay above the engine maximum must clamp to 5000 ms");
+        }
+
+        using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            store.SaveReferenceDevice(null);
+            store.SaveSourceDevice(null);
+        }
+
+        using (var reopened = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(reopened.ReferenceDeviceId is null && reopened.SourceDeviceId is null,
+                "clearing the reference/source must survive a restart");
+        }
+
+        Assert(!File.Exists(path + ".tmp"), "an atomic write must not leave a temp file behind");
+        using (var document = JsonDocument.Parse(File.ReadAllText(path)))
+        {
+            Assert(document.RootElement.TryGetProperty("Version", out _),
+                "the settings file must be valid, versioned JSON");
+        }
+
+        File.WriteAllText(path, "{ this is not valid json");
+        using (var corrupt = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(corrupt.GetSnapshot().Count == 0 &&
+                   corrupt.ReferenceDeviceId is null &&
+                   corrupt.SourceDeviceId is null,
+                "a corrupt settings file must fall back to safe defaults");
+        }
+
+        Assert(Directory.GetFiles(directory, DeviceSettingsStore.FileName + ".corrupt-*").Length == 1,
+            "a corrupt settings file must be backed up for inspection");
+        Assert(!File.Exists(path),
+            "the corrupt settings file must be moved aside before defaults are used");
+
+        // Legacy delay-only file migration.
+        var legacyDirectory = Path.Combine(directory, "legacy");
+        Directory.CreateDirectory(legacyDirectory);
+        var legacyPath = Path.Combine(legacyDirectory, DeviceSettingsStore.FileName);
+        File.WriteAllText(
+            Path.Combine(legacyDirectory, DeviceSettingsStore.LegacyFileName),
+            "{\"old-speaker\":85,\"too-large\":9000}");
+
+        using (var migrated = new DeviceSettingsStore(legacyPath, TimeSpan.Zero))
+        {
+            Assert(migrated.TryGet("old-speaker", out var old) &&
+                   old.DelayMilliseconds is 85,
+                "legacy delay offsets must be imported once");
+            Assert(migrated.TryGet("too-large", out var high) &&
+                   high.DelayMilliseconds is 5_000,
+                "legacy delays must be clamped during migration");
+        }
+
+        Assert(File.Exists(legacyPath),
+            "legacy migration must write the new settings file");
+
+        using (var migrated = new DeviceSettingsStore(legacyPath, TimeSpan.Zero))
+        {
+            migrated.RemoveDelay("old-speaker");
+        }
+
+        using (var reopened = new DeviceSettingsStore(legacyPath, TimeSpan.Zero))
+        {
+            Assert(!reopened.TryGet("old-speaker", out _),
+                "a removed legacy offset must not be re-imported from the stale legacy file");
+        }
+
+        Console.WriteLine($"      persistence, atomic writes, and migration verified at {directory}");
+    }
+    finally
+    {
+        try
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+        catch (Exception)
+        {
+            // Test cleanup is best-effort.
+        }
+    }
+}
+
+static void TestViewModelDeviceSettingsPersistence()
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            RunViewModelDeviceSettingsScenario();
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+    })
+    {
+        IsBackground = true,
+        Name = "SpeakerConnect diagnostics UI persistence"
+    };
+
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+
+    if (failure is not null)
+    {
+        throw new InvalidOperationException(failure.Message, failure);
+    }
+}
+
+static void RunViewModelDeviceSettingsScenario()
+{
+    const string sourceId = "diag-source";
+    const string leftId = "diag-speaker-left";
+    const string rightId = "diag-speaker-right";
+
+    var source = new AudioDeviceInfo(sourceId, "Diagnostic Source", true, 48_000, 2, 16, "16-bit 48 kHz");
+    var left = new AudioDeviceInfo(leftId, "Diagnostic Left", false, 48_000, 2, 16, "16-bit 48 kHz");
+    var right = new AudioDeviceInfo(rightId, "Diagnostic Right", false, 48_000, 2, 16, "16-bit 48 kHz");
+
+    var directory = Path.Combine(
+        Path.GetTempPath(),
+        "SpeakerConnect.Diagnostics",
+        Guid.NewGuid().ToString("N"));
+    var settingsPath = Path.Combine(directory, DeviceSettingsStore.FileName);
+    var balancePath = Path.Combine(directory, "volume-balance.json");
+    var fake = new FakeAudioDeviceEnumerator
+    {
+        Devices = new[] { source, left, right }
+    };
+
+    MainViewModel? viewModel = null;
+
+    try
+    {
+        viewModel = new MainViewModel(
+            fake,
+            new DeviceSettingsStore(settingsPath, TimeSpan.Zero),
+            new VolumeBalanceStore(balancePath));
+
+        Assert(viewModel.Devices.Count == 3, "all fake endpoints must be listed");
+        Assert(viewModel.SourceDevice?.Id == sourceId,
+            "the Windows default endpoint must be the initial source");
+
+        var leftRow = viewModel.Devices.Single(device => device.Id == leftId);
+        var rightRow = viewModel.Devices.Single(device => device.Id == rightId);
+
+        leftRow.IsSelected = true;
+        leftRow.Volume = 42;
+        leftRow.DelayMilliseconds = 120;
+        leftRow.BalanceGainPercent = 80;
+        viewModel.SaveBalanceCommand.Execute(null);
+
+        // Change the source explicitly to prove the selected source is saved
+        // rather than only the Windows default being re-derived at startup.
+        viewModel.SourceDevice = rightRow;
+        viewModel.ReferenceDevice = leftRow;
+
+        Assert(File.Exists(settingsPath),
+            "changing a saved value must write the settings file automatically");
+        Assert(File.Exists(balancePath),
+            "Save Calibration must write the balance file");
+
+        using (var persisted = new DeviceSettingsStore(settingsPath, TimeSpan.Zero))
+        {
+            Assert(persisted.SourceDeviceId == rightId &&
+                   persisted.ReferenceDeviceId == leftId,
+                "source and sync reference must be saved immediately");
+            Assert(persisted.TryGet(leftId, out var saved) &&
+                   saved.VolumePercent is 42 &&
+                   saved.DelayMilliseconds is 120 &&
+                   saved.IsSelected is true,
+                "volume, delay, and selection must be saved immediately");
+        }
+
+        var persistedBalance = new VolumeBalanceStore(balancePath);
+        Assert(persistedBalance.TryGetGain(leftId, out var gain) &&
+               Math.Abs(gain - 0.8f) < 0.001f,
+            "the Smart Volume Balance calibration must be saved by endpoint id");
+
+        viewModel.Dispose();
+        viewModel = null;
+
+        // Restart: a fresh store and VM must restore every value.
+        viewModel = new MainViewModel(
+            fake,
+            new DeviceSettingsStore(settingsPath, TimeSpan.Zero),
+            new VolumeBalanceStore(balancePath));
+
+        leftRow = viewModel.Devices.Single(device => device.Id == leftId);
+        Assert(viewModel.SourceDevice?.Id == rightId, "the saved source must survive a restart");
+        Assert(viewModel.ReferenceDevice?.Id == leftId, "the saved reference must survive a restart");
+        Assert(leftRow.IsSelected, "the selected output group must survive a restart");
+        Assert(leftRow.Volume == 42, "the saved volume must survive a restart");
+        Assert(leftRow.DelayMilliseconds == 120, "the saved delay must survive a restart");
+        Assert(Math.Abs(leftRow.BalanceGainPercent - 80) < 0.01,
+            "the saved balance calibration must survive a restart");
+
+        viewModel.Dispose();
+        viewModel = null;
+
+        // Disconnect: a missing endpoint must not be rewritten with defaults.
+        fake.Devices = new[] { source, right };
+        var disconnectedStore = new DeviceSettingsStore(settingsPath, TimeSpan.Zero);
+        viewModel = new MainViewModel(
+            fake,
+            disconnectedStore,
+            new VolumeBalanceStore(balancePath));
+
+        Assert(viewModel.Devices.All(device => device.Id != leftId),
+            "the disconnected endpoint must not appear in the list");
+        Assert(disconnectedStore.TryGet(leftId, out var kept) &&
+               kept.VolumePercent is 42 &&
+               kept.DelayMilliseconds is 120 &&
+               kept.IsSelected is true,
+            "a disconnected device's saved volume, delay, and selection must be preserved");
+        Assert(disconnectedStore.ReferenceDeviceId == leftId,
+            "the saved reference id must be preserved while its endpoint is absent");
+        Assert(viewModel.ReferenceDevice is null,
+            "an absent reference must not be shown as the active reference");
+
+        viewModel.Dispose();
+        viewModel = null;
+
+        // Reconnect: the same persistent endpoint id recovers its values.
+        fake.Devices = new[] { source, left, right };
+        viewModel = new MainViewModel(
+            fake,
+            new DeviceSettingsStore(settingsPath, TimeSpan.Zero),
+            new VolumeBalanceStore(balancePath));
+
+        leftRow = viewModel.Devices.Single(device => device.Id == leftId);
+        Assert(viewModel.SourceDevice?.Id == rightId,
+            "the saved source must be restored after reconnect");
+        Assert(viewModel.ReferenceDevice?.Id == leftId,
+            "the saved reference must be restored after reconnect");
+        Assert(leftRow.IsSelected &&
+               leftRow.Volume == 42 &&
+               leftRow.DelayMilliseconds == 120,
+            "the reconnected endpoint must recover its group, volume, and delay");
+        Assert(Math.Abs(leftRow.BalanceGainPercent - 80) < 0.01,
+            "the reconnected endpoint must recover its balance calibration");
+
+        Console.WriteLine($"      view-model persistence verified at {settingsPath}");
+    }
+    finally
+    {
+        viewModel?.Dispose();
+
         try
         {
             if (Directory.Exists(directory))
@@ -1608,7 +2002,7 @@ static double CaptureToneRms(MMDeviceEnumerator enumerator, MMDevice endpointDev
     var generator = new SignalGenerator(48000, 2)
     {
         Type = SignalGeneratorType.Sin,
-        Frequency = 440,
+        Frequency = DiagnosticToneFrequencyHz,
         Gain = 0.05
     };
 
@@ -1623,9 +2017,9 @@ static double CaptureToneRms(MMDeviceEnumerator enumerator, MMDevice endpointDev
     Thread.Sleep(200);
     capture.Stop();
 
-    var (count, rms, _, _) = capture.GetResult();
+    var (count, _, _, _) = capture.GetResult();
     Assert(count > 0, "loopback volume probe returned no samples");
-    return rms;
+    return capture.GetToneRms(DiagnosticToneFrequencyHz);
 }
 
 static void WritePcm24(byte[] destination, int offset, int value)
@@ -1755,6 +2149,44 @@ internal sealed class TargetLoopbackCapture : IDisposable
     }
 
     /// <summary>
+    /// Narrowband RMS at one frequency over the middle 50% of the captured window.
+    /// Isolates the generated diagnostic tone from unrelated system audio so the
+    /// gain assertions are not affected by whatever else is playing.
+    /// </summary>
+    public double GetToneRms(double frequency)
+    {
+        lock (_gate)
+        {
+            var frames = _samples.Count / 2;
+            if (frames < 4 || frequency <= 0)
+            {
+                return 0;
+            }
+
+            var start = frames / 4;
+            var end = frames - start;
+            var count = end - start;
+            var sampleRate = _capture.WaveFormat.SampleRate;
+            var omega = 2.0 * Math.PI * frequency / sampleRate;
+            var coefficient = 2.0 * Math.Cos(omega);
+            double s1 = 0;
+            double s2 = 0;
+
+            for (var frame = start; frame < end; frame++)
+            {
+                var sample = 0.5 * (_samples[frame * 2] + _samples[frame * 2 + 1]);
+                var s0 = sample + coefficient * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+
+            var power = s1 * s1 + s2 * s2 - coefficient * s1 * s2;
+            var amplitude = Math.Sqrt(Math.Max(power, 0.0)) * 2.0 / count;
+            return amplitude / Math.Sqrt(2.0);
+        }
+    }
+
+    /// <summary>
     /// RMS over the middle 50% of the capture window. The window includes silence
     /// before and after the test tone, and small start-time differences between
     /// endpoints would otherwise dominate the plain RMS ratio.
@@ -1800,4 +2232,15 @@ internal sealed class TargetLoopbackCapture : IDisposable
             }
         }
     }
+}
+
+/// <summary>
+/// Deterministic endpoint list for view-model diagnostics. No hardware is
+/// enumerated and no endpoint state is touched by this subclass.
+/// </summary>
+internal sealed class FakeAudioDeviceEnumerator : AudioDeviceEnumerator
+{
+    public IReadOnlyList<AudioDeviceInfo> Devices { get; set; } = Array.Empty<AudioDeviceInfo>();
+
+    public override IReadOnlyList<AudioDeviceInfo> GetActiveRenderDevices() => Devices;
 }

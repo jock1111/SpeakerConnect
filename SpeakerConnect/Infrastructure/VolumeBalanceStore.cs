@@ -181,6 +181,12 @@ public sealed class VolumeBalanceStore
                 Gains = gains
             };
         }
+        catch (JsonException)
+        {
+            // Preserve the bad document for inspection, then start with defaults.
+            AtomicFile.TryBackupCorruptFile(_filePath);
+            _settings = new VolumeBalanceSettings();
+        }
         catch (Exception)
         {
             // A corrupt or unreadable settings file must never prevent startup.
@@ -192,13 +198,7 @@ public sealed class VolumeBalanceStore
     {
         try
         {
-            var directory = Path.GetDirectoryName(_filePath);
-            if (!string.IsNullOrEmpty(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            File.WriteAllText(
+            AtomicFile.WriteAllText(
                 _filePath,
                 JsonSerializer.Serialize(_settings, SerializerOptions));
         }
