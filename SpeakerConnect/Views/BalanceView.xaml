@@ -63,9 +63,18 @@
                                Style="{StaticResource CaptionText}"
                                Foreground="{DynamicResource WarningBrush}"
                                Margin="0,8,0,0" />
-                    <TextBlock Text="Calibration is available while routing is stopped. It uses the default Windows microphone and compares each speaker against the quietest measured one; it cannot measure calibrated absolute SPL. Corrections are attenuation-only and never boosted."
-                               Style="{StaticResource CaptionText}"
-                               Margin="0,8,0,0" />
+
+                    <Expander Margin="0,10,0,0">
+                        <Expander.Header>
+                            <TextBlock Text="About volume calibration"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                        </Expander.Header>
+                        <TextBlock Text="Calibration is available while routing is stopped. It uses the default Windows microphone and compares each speaker against the quietest measured one; it cannot measure calibrated absolute SPL. Corrections are attenuation-only and never boosted. Re-run calibration after moving a speaker or changing its Windows endpoint volume."
+                                   Style="{StaticResource CaptionText}"
+                                   Margin="0,8,0,0" />
+                    </Expander>
                 </StackPanel>
             </Border>
 
@@ -83,10 +92,10 @@
                                 <Border Style="{StaticResource SubtleBorder}" Margin="0,0,0,8">
                                     <Grid>
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="90" />
-                                            <ColumnDefinition Width="*" MinWidth="140" />
-                                            <ColumnDefinition Width="20" />
-                                            <ColumnDefinition Width="130" />
+                                            <ColumnDefinition Width="88" />
+                                            <ColumnDefinition Width="*" MinWidth="120" />
+                                            <ColumnDefinition Width="220" MinWidth="140" />
+                                            <ColumnDefinition Width="Auto" MinWidth="52" />
                                         </Grid.ColumnDefinitions>
 
                                         <TextBlock Text="{Binding BalanceRoleLabel}"

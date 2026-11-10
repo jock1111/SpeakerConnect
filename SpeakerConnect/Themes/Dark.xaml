@@ -18,7 +18,7 @@
     <!-- Text -->
     <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="TextSecondaryBrush" Color="#9D9D9D" />
-    <SolidColorBrush x:Key="TextTertiaryBrush" Color="#6E6E6E" />
+    <SolidColorBrush x:Key="TextTertiaryBrush" Color="#949494" />
     <SolidColorBrush x:Key="TextOnAccentBrush" Color="#FFFFFF" />
 
     <!-- Accent and interaction -->

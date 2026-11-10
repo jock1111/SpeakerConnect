@@ -188,13 +188,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         set => SetProperty(ref _currentPage, value);
     }
 
-    /// <summary>Compact endpoint usage readout for the dashboard header.</summary>
+    /// <summary>
+    /// Compact endpoint usage readout for the dashboard header. Distinguishes
+    /// configured (selected) endpoints from endpoints actually rendering audio.
+    /// </summary>
     public string EndpointSummary
     {
         get
         {
-            var active = (SourceDevice is null ? 0 : 1) + SelectedOutputCount;
-            return $"{active} of {MaxTotalAudibleDevices} endpoints active";
+            var count = (SourceDevice is null ? 0 : 1) + SelectedOutputCount;
+            var state = IsRunning ? "playing" : "selected";
+            return $"{count} of {MaxTotalAudibleDevices} endpoints {state}";
         }
     }
 
@@ -552,6 +556,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _isRunning, value))
             {
                 OnPropertyChanged(nameof(IsConfigurationEnabled));
+                OnPropertyChanged(nameof(EndpointSummary));
                 UpdateRowAvailability();
                 NotifyCommands();
             }

@@ -96,6 +96,8 @@
                                 MinWidth="44"
                                 Padding="10,5"
                                 FontSize="12"
+                                VerticalAlignment="Top"
+                                Margin="0,2,0,0"
                                 Command="{Binding DataContext.SetReferenceCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                                 CommandParameter="{Binding}"
                                 IsEnabled="{Binding IsControlEnabled}"
@@ -140,7 +142,8 @@
         </DataTemplate>
     </UserControl.Resources>
 
-    <ScrollViewer VerticalScrollBarVisibility="Auto"
+    <ScrollViewer x:Name="CardsScroll"
+                  VerticalScrollBarVisibility="Auto"
                   HorizontalScrollBarVisibility="Disabled">
         <StackPanel Margin="28,20,28,28">
 
@@ -295,7 +298,8 @@
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemContainerStyle>
                     <Style TargetType="ContentPresenter">
-                        <Setter Property="Width" Value="520" />
+                        <Setter Property="Width"
+                                Value="{Binding CardWidth, RelativeSource={RelativeSource AncestorType=UserControl}}" />
                         <Setter Property="Margin" Value="0,0,16,0" />
                     </Style>
                 </ItemsControl.ItemContainerStyle>

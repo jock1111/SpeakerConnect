@@ -137,9 +137,17 @@
                                Foreground="{DynamicResource WarningBrush}"
                                Margin="0,8,0,0" />
 
-                    <TextBlock Text="Auto Sync uses a linear chirp and normalized cross-correlation on the live routing path. If any routed destination cannot be measured reliably, the whole plan is rejected and no delays change; the manual test remains available. Bluetooth codec latency and clock drift are real physical effects and are not guaranteed to stay constant."
-                               Style="{StaticResource CaptionText}"
-                               Margin="0,8,0,0" />
+                    <Expander Margin="0,10,0,0">
+                        <Expander.Header>
+                            <TextBlock Text="How synchronization works"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                        </Expander.Header>
+                        <TextBlock Text="Auto Sync uses a linear chirp and normalized cross-correlation on the live routing path. If any routed destination cannot be measured reliably, the whole plan is rejected and no delays change; the manual test remains available. Bluetooth codec latency and clock drift are real physical effects and are not guaranteed to stay constant."
+                                   Style="{StaticResource CaptionText}"
+                                   Margin="0,8,0,0" />
+                    </Expander>
                 </StackPanel>
             </Border>
         </StackPanel>
