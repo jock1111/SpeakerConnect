@@ -4,33 +4,41 @@ Play Windows audio through **up to 5 wired, Bluetooth, or USB speakers simultane
 
 Speaker Connect captures the WASAPI loopback mix of one selected playback endpoint (the *source*) and renders synchronized copies to up to four additional endpoints. The original source keeps playing normally through Windows, so you get one stream heard on every speaker in the room.
 
-![Speaker Connect main window](assets/speaker-connect-main.png)
+Speaker Connect uses a sidebar navigation layout with four pages: **Dashboard**, **Synchronization**, **Volume Balance**, and **Settings & Diagnostics**. Dark and light themes are supported (Settings → Theme, or the sidebar picker).
 
-*Main window: header with routing controls, loopback source card, additional-outputs device list, master volume, synchronization calibration, Smart Volume Balance, and a limitations reference.*
+![Speaker Connect dashboard](assets/speaker-connect-main.png)
 
-### Device selection and outputs
+*Dashboard: routing status and Start/Stop control, master volume and mute, the loopback source picker, and responsive speaker cards with selection, badges, per-speaker volume, delay, and reference controls.*
+
+### Speaker cards
 
 ![Device selection and outputs](assets/speaker-connect-devices.png)
 
-*The "Additional outputs" card lists every render endpoint with a checkbox, per-device volume trim, delay control, and reference-speaker button. Up to four destinations can be checked (five audible endpoints including the source).*
+*Each speaker card shows the endpoint name, connection hints (Default, Bluetooth-style name match), role badges (Source / Output / Reference), a route checkbox, volume slider, delay slider, and a Ref button. Up to four destinations can be checked (five audible endpoints including the source).*
 
 ### Master volume and transport
 
 ![Master volume and transport controls](assets/speaker-connect-volume.png)
 
-*Start/Stop routing buttons sit above the group master-volume slider and mute button. Windows keyboard keys and the taskbar slider drive the same logical volume.*
+*The Dashboard hero card shows routing state with a large Start/Stop button; the master-volume card holds the group slider and mute pill. Windows keyboard keys and the taskbar slider drive the same logical volume.*
 
 ### Synchronization
 
 ![Synchronization](assets/speaker-connect-sync.png)
 
-*The synchronization expander offers Auto Sync (microphone-assisted chirp measurement), a live Manual Sync burst test, a reference-speaker selector, per-device delay and measured-offset status, Reset Sync, and Save Calibration.*
+*The Synchronization page offers Auto Sync (microphone-assisted chirp measurement), a live Manual Sync burst test, a reference-speaker selector, per-speaker delay and measured-offset status (relative to the acoustic anchor — negative means earlier), Reset Sync, and Save Calibration.*
 
 ### Smart Volume Balance
 
 ![Smart Volume Balance](assets/speaker-connect-volume-balance.png)
 
-*The balance expander shows the enable checkbox, a per-speaker attenuation slider for every endpoint (source and outputs), live status, the source-endpoint limitation note, and the Calibrate / Reset / Save buttons.*
+*The Volume Balance page shows the enable checkbox, Calibrate / Reset / Save buttons, live status, the source-endpoint limitation note, and a per-speaker attenuation slider for every endpoint (source and outputs).*
+
+### Settings and diagnostics
+
+![Settings and diagnostics](assets/speaker-connect-settings.png)
+
+*The Settings page holds the theme picker, latency buffer profile, live routing diagnostics while running, and a collapsible explanation of what the application can and cannot do.*
 
 ## Features
 
@@ -197,9 +205,11 @@ The signal test unmutes the endpoints it needs and restores their volume/mute af
 ```text
 SpeakerConnect/                  WPF application
   Audio/                         Capture, routing engine, volume manager, calibration
-  Infrastructure/                MVVM helpers, atomic per-endpoint settings stores
+  Infrastructure/                MVVM helpers, atomic stores, theme manager
   Models/                        Device and routing models
-  ViewModels/                    MainWindow view models
+  Themes/                        Dark/Light brush dictionaries + shared control styles
+  Views/                         Dashboard, Synchronization, Balance, Settings pages
+  ViewModels/                    MainWindow view models and converters
 SpeakerConnect.Diagnostics/      Console diagnostics harness
 SpeakerConnect.slnx              Solution file
 ```
