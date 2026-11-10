@@ -1,0 +1,63 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Windows 11-style dark theme brushes. All control styles reference these
+         through DynamicResource so the theme can be swapped at runtime. -->
+
+    <!-- Surfaces -->
+    <SolidColorBrush x:Key="PageBackgroundBrush" Color="#202020" />
+    <SolidColorBrush x:Key="CardBackgroundBrush" Color="#2B2B2B" />
+    <SolidColorBrush x:Key="CardHoverBackgroundBrush" Color="#313131" />
+    <SolidColorBrush x:Key="SubtleBackgroundBrush" Color="#242424" />
+    <SolidColorBrush x:Key="NavBackgroundBrush" Color="#1F1F1F" />
+    <SolidColorBrush x:Key="NavSelectedBrush" Color="#2F2F2F" />
+    <SolidColorBrush x:Key="NavHoverBrush" Color="#2A2A2A" />
+    <SolidColorBrush x:Key="InputBackgroundBrush" Color="#1C1C1C" />
+    <SolidColorBrush x:Key="TrackBackgroundBrush" Color="#3D3D3D" />
+    <SolidColorBrush x:Key="SeparatorBrush" Color="#3B3B3B" />
+
+    <!-- Text -->
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#9D9D9D" />
+    <SolidColorBrush x:Key="TextTertiaryBrush" Color="#949494" />
+    <SolidColorBrush x:Key="TextOnAccentBrush" Color="#FFFFFF" />
+
+    <!-- Accent and interaction -->
+    <SolidColorBrush x:Key="AccentBrush" Color="#4CC2FF" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#62CEFF" />
+    <SolidColorBrush x:Key="AccentPressedBrush" Color="#38B6F2" />
+    <SolidColorBrush x:Key="AccentSubtleBrush" Color="#1F3A4D" />
+    <SolidColorBrush x:Key="HoverBackgroundBrush" Color="#2A2A2A" />
+    <SolidColorBrush x:Key="PressedBackgroundBrush" Color="#333333" />
+    <SolidColorBrush x:Key="SelectedBackgroundBrush" Color="#1E3A4C" />
+    <SolidColorBrush x:Key="FocusBorderBrush" Color="#4CC2FF" />
+
+    <!-- Button chrome -->
+    <SolidColorBrush x:Key="ButtonBackgroundBrush" Color="#2F2F2F" />
+    <SolidColorBrush x:Key="ButtonHoverBackgroundBrush" Color="#3A3A3A" />
+    <SolidColorBrush x:Key="ButtonPressedBackgroundBrush" Color="#2A2A2A" />
+    <SolidColorBrush x:Key="ButtonBorderBrush" Color="#454545" />
+
+    <!-- Status -->
+    <SolidColorBrush x:Key="SuccessBrush" Color="#6CCB5F" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#FCE100" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#FF99A4" />
+    <SolidColorBrush x:Key="ErrorSubtleBrush" Color="#3B2023" />
+    <SolidColorBrush x:Key="InfoBrush" Color="#4CC2FF" />
+
+    <!-- Slider -->
+    <SolidColorBrush x:Key="SliderThumbBrush" Color="#FFFFFF" />
+
+    <!-- Badges -->
+    <SolidColorBrush x:Key="BadgeSourceBackgroundBrush" Color="#1E3A4C" />
+    <SolidColorBrush x:Key="BadgeSourceTextBrush" Color="#7DD3FC" />
+    <SolidColorBrush x:Key="BadgeOutputBackgroundBrush" Color="#1E3324" />
+    <SolidColorBrush x:Key="BadgeOutputTextBrush" Color="#6CCB5F" />
+    <SolidColorBrush x:Key="BadgeReferenceBackgroundBrush" Color="#3D2E12" />
+    <SolidColorBrush x:Key="BadgeReferenceTextBrush" Color="#FCE100" />
+    <SolidColorBrush x:Key="BadgeNeutralBackgroundBrush" Color="#333333" />
+    <SolidColorBrush x:Key="BadgeNeutralTextBrush" Color="#BDBDBD" />
+
+    <!-- Disabled -->
+    <SolidColorBrush x:Key="DisabledTextBrush" Color="#5F5F5F" />
+    <SolidColorBrush x:Key="DisabledBackgroundBrush" Color="#262626" />
+</ResourceDictionary>

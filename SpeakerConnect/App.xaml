@@ -3,6 +3,14 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:SpeakerConnect">
     <Application.Resources>
-         
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/Shared.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- Theme brushes (Themes/Dark.xaml or Themes/Light.xaml) are merged
+                 in code by ThemeManager at startup and whenever the user switches
+                 theme, so the choice can be swapped without a restart. -->
+        </ResourceDictionary>
     </Application.Resources>
 </Application>

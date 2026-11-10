@@ -26,13 +26,23 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _suppressSelectionHandling;
     private bool _suppressBalanceHandling;
     private bool _disposed;
+    private const string SyncMethodDestination =
+        "microphone chirp cross-correlation (routed path, relative to anchor)";
+
+    private const string SyncMethodSource =
+        "microphone chirp cross-correlation (source path, relative to anchor)";
+
     private string _statusMessage = "Ready.";
     private string _errorMessage = string.Empty;
     private BufferProfile _selectedBufferProfile = BufferProfile.Default;
     private string _syncDiagnosticsSummary = string.Empty;
-    private string _calibrationStatus =
-        "Start routing, play any audio, then press \"Play calibration clicks\". Delay the " +
-        "device that hears the click first until the clicks line up, then save the offsets.";
+    private string _syncStatus =
+        "Start routing, then use Auto Sync for a microphone measurement or the manual test " +
+        "to compare speakers by ear. Auto Sync measures relative arrival times on the live " +
+        "routing path; manual delay remains available when acoustic measurement is not possible.";
+    private string _syncDetail = string.Empty;
+    private bool _isSyncBusy;
+    private bool _isAutoSyncing;
     private DeviceViewModel? _bluetoothSourceHint;
     private DeviceViewModel? _referenceDevice;
     private bool _balanceEnabled;
@@ -42,6 +52,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         "Calibrate Volume. Short pink-noise bursts are played through one speaker at a " +
         "time; measurements match relative loudness only, not calibrated absolute SPL.";
     private CancellationTokenSource? _calibrationCancellation;
+    private CancellationTokenSource? _syncCancellation;
+    private readonly UiPreferencesStore _uiPreferences;
+    private AppPage _currentPage = AppPage.Dashboard;
+    private ThemeMode _theme = ThemeMode.Dark;
 
     public MainViewModel()
         : this(new AudioDeviceEnumerator(), new DeviceSettingsStore(), new VolumeBalanceStore())
@@ -52,7 +66,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         AudioDeviceEnumerator deviceEnumerator,
         DeviceSettingsStore deviceSettingsStore,
         VolumeBalanceStore balanceStore)
+        : this(deviceEnumerator, deviceSettingsStore, balanceStore, new UiPreferencesStore())
     {
+    }
+
+    internal MainViewModel(
+        AudioDeviceEnumerator deviceEnumerator,
+        DeviceSettingsStore deviceSettingsStore,
+        VolumeBalanceStore balanceStore,
+        UiPreferencesStore uiPreferences)
+    {
+        _uiPreferences = uiPreferences ?? throw new ArgumentNullException(nameof(uiPreferences));
+        _theme = _uiPreferences.Theme;
+        ThemeManager.Apply(_theme);
         _dispatcher = Dispatcher.CurrentDispatcher;
         _deviceEnumerator = deviceEnumerator ?? throw new ArgumentNullException(nameof(deviceEnumerator));
         _deviceSettingsStore = deviceSettingsStore ?? throw new ArgumentNullException(nameof(deviceSettingsStore));
@@ -73,15 +99,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         UseBluetoothSourceCommand = new RelayCommand(
             UseBluetoothSource,
             () => IsConfigurationEnabled && BluetoothSourceHint is not null);
-        PlayCalibrationClicksCommand = new AsyncRelayCommand(
-            PlayCalibrationClicksAsync,
-            () => IsConfigurationEnabled && Devices.Any(device => device.IsSelected && !device.IsSource));
-        ClearSavedOffsetsCommand = new RelayCommand(
-            ClearSavedOffsets,
-            () => Devices.Any(device => device.DelayMilliseconds > 0));
+        AutoSyncCommand = new AsyncRelayCommand(AutoSyncAsync, CanRunAutoSync);
+        ManualSyncCommand = new AsyncRelayCommand(ManualSyncAsync, CanRunManualSync);
+        CancelSyncCommand = new RelayCommand(CancelSync, () => IsSyncBusy);
+        ResetSyncCommand = new RelayCommand(ResetSync, CanResetSync);
+        SaveSyncCommand = new RelayCommand(SaveSync, CanSaveSync);
         SetReferenceCommand = new RelayCommand<DeviceViewModel>(
             device => ReferenceDevice = device,
-            device => device is not null && !device.IsSource && IsConfigurationEnabled && device.IsSelected);
+            device => device is not null &&
+                      !device.IsSource &&
+                      device.IsSelected &&
+                      !IsBusy &&
+                      !IsSyncBusy);
         CalibrateVolumeCommand = new AsyncRelayCommand(CalibrateVolumeAsync, CanCalibrateVolume);
         ResetBalanceCommand = new RelayCommand(ResetBalance, CanResetBalance);
         SaveBalanceCommand = new RelayCommand(SaveBalance, () => !IsBusy);
@@ -108,6 +137,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public ObservableCollection<DeviceViewModel> Devices { get; } = new();
 
+    /// <summary>
+    /// Routed destinations offered as the manual sync reference. Auto Sync still aligns
+    /// to the latest measured path; the reference is the speaker a listener compares
+    /// the other routed copies against during the manual test.
+    /// </summary>
+    public ObservableCollection<DeviceViewModel> SyncReferenceCandidates { get; } = new();
+
     public AsyncRelayCommand StartCommand { get; }
 
     public AsyncRelayCommand StopCommand { get; }
@@ -116,9 +152,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public RelayCommand UseBluetoothSourceCommand { get; }
 
-    public AsyncRelayCommand PlayCalibrationClicksCommand { get; }
+    public AsyncRelayCommand AutoSyncCommand { get; }
 
-    public RelayCommand ClearSavedOffsetsCommand { get; }
+    public AsyncRelayCommand ManualSyncCommand { get; }
+
+    public RelayCommand CancelSyncCommand { get; }
+
+    public RelayCommand ResetSyncCommand { get; }
+
+    public RelayCommand SaveSyncCommand { get; }
 
     public RelayCommand<DeviceViewModel> SetReferenceCommand { get; }
 
@@ -127,6 +169,57 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public RelayCommand ResetBalanceCommand { get; }
 
     public RelayCommand SaveBalanceCommand { get; }
+
+    // ---------------- Navigation ----------------
+
+    /// <summary>Sidebar pages shown in the main window.</summary>
+    public IReadOnlyList<AppPageItem> Pages { get; } = new[]
+    {
+        new AppPageItem(AppPage.Dashboard, "Dashboard", "\uE80F"),
+        new AppPageItem(AppPage.Synchronization, "Synchronization", "\uE895"),
+        new AppPageItem(AppPage.VolumeBalance, "Volume Balance", "\uE767"),
+        new AppPageItem(AppPage.Settings, "Settings", "\uE713")
+    };
+
+    /// <summary>The currently visible page. Switching pages never touches routing.</summary>
+    public AppPage CurrentPage
+    {
+        get => _currentPage;
+        set => SetProperty(ref _currentPage, value);
+    }
+
+    /// <summary>
+    /// Compact endpoint usage readout for the dashboard header. Distinguishes
+    /// configured (selected) endpoints from endpoints actually rendering audio.
+    /// </summary>
+    public string EndpointSummary
+    {
+        get
+        {
+            var count = (SourceDevice is null ? 0 : 1) + SelectedOutputCount;
+            var state = IsRunning ? "playing" : "selected";
+            return $"{count} of {MaxTotalAudibleDevices} endpoints {state}";
+        }
+    }
+
+    // ---------------- Appearance ----------------
+
+    public IReadOnlyList<ThemeMode> ThemeModes { get; } =
+        (ThemeMode[])Enum.GetValues(typeof(ThemeMode));
+
+    /// <summary>Selected application theme; applied immediately and persisted.</summary>
+    public ThemeMode Theme
+    {
+        get => _theme;
+        set
+        {
+            if (SetProperty(ref _theme, value))
+            {
+                ThemeManager.Apply(value);
+                _uiPreferences.SaveTheme(value);
+            }
+        }
+    }
 
     public float MasterVolume
     {
@@ -272,11 +365,73 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _syncDiagnosticsSummary, value);
     }
 
-    public string CalibrationStatus
+    public string SyncStatus
     {
-        get => _calibrationStatus;
-        private set => SetProperty(ref _calibrationStatus, value);
+        get => _syncStatus;
+        private set => SetProperty(ref _syncStatus, value);
     }
+
+    public string SyncDetail
+    {
+        get => _syncDetail;
+        private set
+        {
+            if (SetProperty(ref _syncDetail, value))
+            {
+                OnPropertyChanged(nameof(HasSyncDetail));
+            }
+        }
+    }
+
+    public bool HasSyncDetail => !string.IsNullOrWhiteSpace(SyncDetail);
+
+    /// <summary>True while Auto Sync or the manual live test owns the routing channels.</summary>
+    public bool IsSyncBusy
+    {
+        get => _isSyncBusy;
+        private set
+        {
+            if (SetProperty(ref _isSyncBusy, value))
+            {
+                OnPropertyChanged(nameof(IsSyncControlsEnabled));
+                UpdateRowAvailability();
+                NotifyCommands();
+            }
+        }
+    }
+
+    /// <summary>
+    /// True only during Auto Sync. Delay sliders stay editable during the manual test,
+    /// which is the entire point of that workflow.
+    /// </summary>
+    public bool IsAutoSyncing
+    {
+        get => _isAutoSyncing;
+        private set
+        {
+            if (SetProperty(ref _isAutoSyncing, value))
+            {
+                OnPropertyChanged(nameof(IsSyncControlsEnabled));
+                UpdateRowAvailability();
+                NotifyCommands();
+            }
+        }
+    }
+
+    public bool IsSyncControlsEnabled => IsRunning && !IsBusy && !IsSyncBusy;
+
+    /// <summary>
+    /// This limitation is architectural, not a missing calibration step: the loopback
+    /// source is rendered by Windows and is not part of the application's delay path.
+    /// </summary>
+    public string SyncSourceLimitNote =>
+        "The original loopback source is rendered directly by Windows and cannot be delayed " +
+        "or advanced by Speaker Connect. If it is earlier than the latest measured speaker, " +
+        "adding delay to the copies cannot make them earlier; Auto Sync reports that deficit " +
+        "instead of presenting it as a fix. Choose a source endpoint whose own path is at " +
+        "least as slow as the slowest destination, or use a separate virtual audio endpoint " +
+        "architecture in which the router owns the source clock. This app does not install " +
+        "a virtual audio driver.";
 
     public DeviceViewModel? BluetoothSourceHint
     {
@@ -334,8 +489,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public bool HasReferenceDevice => ReferenceDevice is not null;
 
     public string ReferenceSummary => ReferenceDevice is null
-        ? "No sync reference selected."
-        : $"Sync reference: {ReferenceDevice.DisplayName}. Calibrate other speakers against this one.";
+        ? "No manual sync reference selected. Auto Sync uses the latest reliable measured path as the acoustic anchor."
+        : $"Manual sync reference: {ReferenceDevice.DisplayName}. Compare the other routed copies against " +
+          "this speaker by ear. Auto Sync still aligns to the latest reliable measured path; if this " +
+          "reference is earlier than that path, it will also be delayed.";
 
     public DeviceViewModel? SourceDevice
     {
@@ -399,6 +556,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _isRunning, value))
             {
                 OnPropertyChanged(nameof(IsConfigurationEnabled));
+                OnPropertyChanged(nameof(EndpointSummary));
                 UpdateRowAvailability();
                 NotifyCommands();
             }
@@ -483,6 +641,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         _calibrationCancellation = null;
 
+        try
+        {
+            _syncCancellation?.Cancel();
+            _syncCancellation?.Dispose();
+        }
+        catch (Exception)
+        {
+            // Synchronization cancellation is best-effort during shutdown.
+        }
+
+        _syncCancellation = null;
+
         _routingEngine.StateChanged -= OnRoutingStateChanged;
         _routingEngine.FaultOccurred -= OnRoutingFaultOccurred;
         _routingEngine.StabilityFallback -= OnStabilityFallback;
@@ -513,6 +683,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         catch (Exception)
         {
             // Settings flushing is best-effort during shutdown.
+        }
+
+        try
+        {
+            _uiPreferences.Dispose();
+        }
+        catch (Exception)
+        {
+            // Preferences flushing is best-effort during shutdown.
         }
 
         GC.SuppressFinalize(this);
@@ -611,6 +790,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Unblock a running Auto Sync or manual test before the engine disposes the
+        // channels it is using.
+        CancelSync();
         IsBusy = true;
         StatusMessage = "Stopping audio routing...";
 
@@ -711,6 +893,28 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     }
                 }
 
+                // Restore the last acoustic timing result, if any. The saved values
+                // win because they are the durable copy written by Auto Sync; the
+                // previous in-memory row is a fallback for an unflushed change.
+                if (savedSettings.TryGetValue(info.Id, out var savedSync) &&
+                    savedSync.MeasuredOffsetMilliseconds is double savedOffset)
+                {
+                    row.ApplySyncMeasurement(
+                        savedOffset,
+                        savedSync.MeasurementConfidencePercent,
+                        savedSync.SyncMeasurementMethod,
+                        savedSync.SyncMeasuredAtUtc);
+                }
+                else if (previous is not null &&
+                         previous.MeasuredOffsetMilliseconds is double previousOffset)
+                {
+                    row.ApplySyncMeasurement(
+                        previousOffset,
+                        previous.MeasurementConfidencePercent,
+                        previous.SyncMeasurementMethod,
+                        previous.SyncMeasuredAtUtc);
+                }
+
                 row.PropertyChanged += OnDevicePropertyChanged;
                 Devices.Add(row);
             }
@@ -773,6 +977,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         RefreshBluetoothHints();
+        RefreshSyncReferenceCandidates();
 
         UpdateRowAvailability();
         RaiseSelectionSummaryChanged();
@@ -799,10 +1004,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                                !device.IsSource &&
                                (device.IsSelected || selectedCount < MaxAdditionalOutputs);
             device.CanAdjustBalance = !IsBusy;
+            device.CanAdjustDelay = !IsBusy &&
+                                    !IsAutoSyncing &&
+                                    device.IsSelected &&
+                                    !device.IsSource;
         }
 
         OnPropertyChanged(nameof(BalanceSummary));
         OnPropertyChanged(nameof(IsBalanceControlsEnabled));
+        OnPropertyChanged(nameof(IsSyncControlsEnabled));
     }
 
     private void OnSelectionChanged(DeviceViewModel device)
@@ -811,6 +1021,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             return;
         }
+
+        // Keep the manual reference list in sync with the routed group. Clearing the
+        // active reference here is deliberately not persisted: a temporarily
+        // unrouted device keeps its saved reference id for a later reconnect.
+        RefreshSyncReferenceCandidates();
 
         if (device.IsSelected && device.IsSource)
         {
@@ -849,6 +1064,37 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         UpdateRowAvailability();
         RaiseSelectionSummaryChanged();
+        NotifyCommands();
+    }
+
+    /// <summary>
+    /// Rebuilds the candidate list used by the synchronization section. The saved
+    /// reference id is intentionally kept when the active reference is temporarily
+    /// unrouted, so a reconnect can restore it.
+    /// </summary>
+    private void RefreshSyncReferenceCandidates()
+    {
+        SyncReferenceCandidates.Clear();
+        foreach (var device in Devices.Where(device => device.IsSelected && !device.IsSource))
+        {
+            SyncReferenceCandidates.Add(device);
+        }
+
+        if (_referenceDevice is not null && !SyncReferenceCandidates.Contains(_referenceDevice))
+        {
+            var previousSuppression = _suppressSelectionHandling;
+            _suppressSelectionHandling = true;
+            try
+            {
+                ReferenceDevice = null;
+            }
+            finally
+            {
+                _suppressSelectionHandling = previousSuppression;
+            }
+        }
+
+        OnPropertyChanged(nameof(ReferenceSummary));
         NotifyCommands();
     }
 
@@ -1120,6 +1366,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         OnPropertyChanged(nameof(SelectedOutputCount));
         OnPropertyChanged(nameof(SelectionSummary));
+        OnPropertyChanged(nameof(EndpointSummary));
         OnPropertyChanged(nameof(BalanceSummary));
     }
 
@@ -1139,7 +1386,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SourceDevice = hint;
         StatusMessage =
             $"Bluetooth-style source selected: {hint.DisplayName}. Route to the wired device and use " +
-            "its delay slider (or the calibration clicks) to compensate the Bluetooth path.";
+            "Auto Sync (or the manual burst test) to compensate the added Bluetooth path latency.";
     }
 
     private bool CanCalibrateVolume()
@@ -1396,72 +1643,389 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
-    private async Task PlayCalibrationClicksAsync()
+    private bool CanRunAutoSync()
     {
+        return IsRunning &&
+               !IsBusy &&
+               !IsSyncBusy &&
+               SelectedOutputCount > 0;
+    }
+
+    private bool CanRunManualSync() => CanRunAutoSync();
+
+    /// <summary>
+    /// Measures every routed destination and the loopback source on the live routing
+    /// path, then applies the resulting delays. The engine refuses to run unless routing
+    /// is active, because measuring a synthetic path would not represent the real one.
+    /// </summary>
+    private async Task AutoSyncAsync()
+    {
+        if (!CanRunAutoSync())
+        {
+            SyncStatus = "Auto Sync needs running routing and at least one routed destination.";
+            return;
+        }
+
         var targets = Devices
             .Where(device => device.IsSelected && !device.IsSource)
             .Select(device => new AudioOutputTarget(
                 device.Id,
-                Math.Max((float)(device.Volume / 100.0), 0.15f),
+                Math.Max((float)(device.Volume / 100.0), 0.10f),
                 device.DelayMilliseconds))
             .ToList();
 
         if (targets.Count == 0)
         {
-            CalibrationStatus = "Check at least one additional output first, then play the calibration clicks.";
+            SyncStatus = "Check at least one additional output before running Auto Sync.";
             return;
         }
 
+        var referenceId = ReferenceDevice?.Id;
+        var cancellation = new CancellationTokenSource();
+        _syncCancellation = cancellation;
         ErrorMessage = string.Empty;
-        IsBusy = true;
-
-        var reference = ReferenceDevice;
-        var referenceTarget = reference is not null
-            ? targets.FirstOrDefault(t => string.Equals(t.DeviceId, reference.Id, StringComparison.OrdinalIgnoreCase))
-            : null;
-
-        var orderedTargets = new List<AudioOutputTarget>();
-        if (referenceTarget is not null)
-        {
-            orderedTargets.Add(referenceTarget);
-            orderedTargets.AddRange(targets.Where(t => t.DeviceId != referenceTarget.DeviceId));
-        }
-        else
-        {
-            orderedTargets.AddRange(targets);
-        }
-
-        CalibrationStatus =
-            reference is not null
-                ? $"Playing calibration click on reference ({reference.DisplayName}) first, then {targets.Count - 1} other speaker(s). Adjust delays until clicks line up."
-                : $"Playing one calibration click on {targets.Count} destination(s). Delay the device that sounds first until the clicks line up.";
+        SyncDetail = string.Empty;
+        SyncStatus =
+            "Auto Sync is measuring the source and every routed destination with short chirps. " +
+            "Keep the room quiet and leave the speakers and volume controls alone until it finishes.";
+        IsAutoSyncing = true;
+        IsSyncBusy = true;
 
         try
         {
-            // Play the reference first so the user hears the reference timing, then
-            // each other speaker. The engine plays them one device at a time.
-            var errors = await Task.Run(() => _routingEngine.PlayCalibrationImpulse(orderedTargets));
-            CalibrationStatus = errors.Count == 0
-                ? "Calibration clicks played. Adjust the per-device delay on non-reference speakers until the clicks line up with the reference, " +
-                  "then keep the values (they are saved automatically for the next session)."
-                : string.Join(Environment.NewLine, errors);
+            var result = await Task.Run(() => _routingEngine.RunAutoSync(
+                targets,
+                referenceId,
+                cancellation.Token));
+
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (cancellation.IsCancellationRequested ||
+                _routingEngine.State != AudioRoutingState.Running)
+            {
+                SyncStatus = "Auto Sync was cancelled or routing stopped. No delays were changed.";
+                return;
+            }
+
+            ApplyAutoSyncResult(result);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!_disposed)
+            {
+                SyncStatus = "Auto Sync was cancelled. No delays were changed.";
+            }
         }
         catch (Exception ex)
         {
-            CalibrationStatus = $"Calibration clicks failed: {ex.Message}";
+            if (!_disposed)
+            {
+                SyncStatus = $"Auto Sync failed: {ex.Message}";
+                ErrorMessage = ex.Message;
+            }
         }
         finally
         {
-            IsBusy = false;
-            UpdateRowAvailability();
-            NotifyCommands();
+            if (ReferenceEquals(_syncCancellation, cancellation))
+            {
+                _syncCancellation = null;
+            }
+
+            cancellation.Dispose();
+
+            if (!_disposed)
+            {
+                IsAutoSyncing = false;
+                IsSyncBusy = false;
+                UpdateRowAvailability();
+                NotifyCommands();
+            }
         }
     }
 
-    private void ClearSavedOffsets()
+    private void ApplyAutoSyncResult(SyncCalibrationRunResult result)
     {
-        // Saving the null reference must happen outside the selection suppression.
-        ReferenceDevice = null;
+        if (result.Plan is null || !result.Plan.Success)
+        {
+            SyncStatus = result.Message;
+            SyncDetail = BuildSyncDetail(result.Plan, result.Measurements, result.MeasuredAtUtc, applied: false);
+            MarkUnreliableMeasurements(result.Measurements);
+            StatusMessage = "Auto Sync did not change any delays.";
+            return;
+        }
+
+        var plan = result.Plan;
+
+        // Apply the plan before saving metadata. Setting the row value updates the live
+        // engine channel (when routing is running) and the durable delay entry.
+        foreach (var recommendation in plan.Recommendations.Where(item => !item.IsSource))
+        {
+            var row = FindDevice(recommendation.DeviceId);
+            if (row is not null && row.DelayMilliseconds != recommendation.SuggestedDelayMilliseconds)
+            {
+                row.DelayMilliseconds = recommendation.SuggestedDelayMilliseconds;
+            }
+        }
+
+        foreach (var measurement in result.Measurements)
+        {
+            var row = FindDevice(measurement.DeviceId);
+            if (row is null)
+            {
+                continue;
+            }
+
+            if (!measurement.IsReliable)
+            {
+                row.SetSyncMeasurementFailure(
+                    measurement.FailureReason ?? "The measurement was not reliable.");
+                continue;
+            }
+
+            var inherent = measurement.ArrivalOffsetMilliseconds -
+                           (measurement.IsSource ? 0 : measurement.ConfiguredDelayMilliseconds);
+
+            // Only differences between speakers are physically meaningful. The raw
+            // correlation offset shares an arbitrary microphone/ring recording origin,
+            // so store the measured path relative to the acoustic anchor instead of
+            // presenting that origin as an absolute hardware latency.
+            var relativeToAnchor = inherent - plan.AnchorInherentLatencyMilliseconds;
+            var method = measurement.IsSource ? SyncMethodSource : SyncMethodDestination;
+
+            row.ApplySyncMeasurement(
+                relativeToAnchor,
+                measurement.ConfidencePercent,
+                method,
+                result.MeasuredAtUtc);
+
+            // Auto Sync persists successful results immediately so reconnect and
+            // restart restore the measured metadata together with the delays.
+            _deviceSettingsStore.SaveSyncMeasurement(
+                measurement.DeviceId,
+                relativeToAnchor,
+                measurement.ConfidencePercent,
+                method,
+                result.MeasuredAtUtc);
+        }
+
+        _deviceSettingsStore.Flush();
+
+        SyncStatus = plan.Message;
+        SyncDetail = BuildSyncDetail(plan, result.Measurements, result.MeasuredAtUtc, applied: true);
+        StatusMessage = plan.SourceIsEarlier
+            ? "Auto Sync applied delays, but the source is earlier than the latest measured path."
+            : "Auto Sync applied and saved the measured delays.";
+        OnPropertyChanged(nameof(ReferenceSummary));
+        NotifyCommands();
+    }
+
+    private void MarkUnreliableMeasurements(IReadOnlyList<SyncSpeakerMeasurement> measurements)
+    {
+        foreach (var measurement in measurements.Where(item => !item.IsReliable))
+        {
+            var row = FindDevice(measurement.DeviceId);
+            row?.SetSyncMeasurementFailure(
+                measurement.FailureReason ?? "The measurement was not reliable.");
+        }
+    }
+
+    private string BuildSyncDetail(
+        SyncCalibrationPlan? plan,
+        IReadOnlyList<SyncSpeakerMeasurement> measurements,
+        DateTimeOffset measuredAtUtc,
+        bool applied)
+    {
+        var lines = new List<string>();
+
+        if (plan is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(plan.AnchorNote))
+            {
+                lines.Add(plan.AnchorNote);
+            }
+
+            if (plan.AcousticAnchorDisplayName is not null)
+            {
+                lines.Add(
+                    $"Acoustic anchor: {plan.AcousticAnchorDisplayName} (0 ms reference). " +
+                    $"Overall confidence {plan.OverallConfidencePercent:0}%; maximum rounding " +
+                    $"residual {plan.MaxResidualMilliseconds:0.0} ms. Absolute hardware latency " +
+                    "is not known; only the measured differences between speakers are used.");
+            }
+
+            if (plan.SourceIsEarlier)
+            {
+                lines.Add(
+                    $"Source deficit: the source arrived {plan.SourceDeficitMilliseconds:0} ms earlier " +
+                    "than the latest measured path. Adding delay to the already-late routed copies " +
+                    "cannot make them earlier. For exact alignment with this source, choose a source " +
+                    "endpoint whose own path is at least as slow as the slowest destination (for " +
+                    "example a Bluetooth endpoint), or use a virtual audio endpoint architecture in " +
+                    "which the router owns the source clock. This app does not install a virtual " +
+                    "audio driver.");
+            }
+        }
+
+        foreach (var measurement in measurements)
+        {
+            var role = measurement.IsSource ? "source" : "routed copy";
+            if (!measurement.IsReliable)
+            {
+                lines.Add(
+                    $"{measurement.DisplayName} ({role}): unreliable — " +
+                    (measurement.FailureReason ?? "the correlation confidence was too low."));
+                continue;
+            }
+
+            var inherent = measurement.ArrivalOffsetMilliseconds -
+                           (measurement.IsSource ? 0 : measurement.ConfiguredDelayMilliseconds);
+            double? relativeToAnchor = null;
+            if (plan?.AcousticAnchorDisplayName is not null)
+            {
+                relativeToAnchor = inherent - plan.AnchorInherentLatencyMilliseconds;
+            }
+
+            var timing = relativeToAnchor switch
+            {
+                null => $"measured arrival offset {inherent:0} ms (recording origin; no alignment applied)",
+                double relative when Math.Abs(relative) < 0.5 => "measured acoustic anchor (0 ms reference)",
+                double relative when relative < 0 => $"measured {-relative:0} ms earlier than the anchor",
+                double relative => $"measured {relative:0} ms later than the anchor"
+            };
+
+            lines.Add(
+                $"{measurement.DisplayName} ({role}): {timing}, " +
+                $"confidence {measurement.ConfidencePercent:0}%, configured delay " +
+                $"{measurement.ConfiguredDelayMilliseconds} ms.");
+        }
+
+        lines.Add(applied
+            ? "The suggested delays were applied and saved by persistent endpoint id."
+            : "No delays were changed.");
+        lines.Add($"Measured at {measuredAtUtc.LocalDateTime:g}.");
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// Plays a burst train natively through the loopback source while routing is live.
+    /// Every destination receives it through the real loopback/delay path; the user
+    /// adjusts delay sliders by ear. This is deliberately not described as a
+    /// measurement.
+    /// </summary>
+    private async Task ManualSyncAsync()
+    {
+        if (!CanRunManualSync())
+        {
+            SyncStatus = "The manual test needs running routing and at least one routed destination.";
+            return;
+        }
+
+        var cancellation = new CancellationTokenSource();
+        _syncCancellation = cancellation;
+        ErrorMessage = string.Empty;
+        SyncDetail = string.Empty;
+
+        var referenceText = ReferenceDevice is null
+            ? "no manual reference selected"
+            : $"manual reference {ReferenceDevice.DisplayName}";
+        SyncStatus =
+            $"Manual sync test is playing a burst train through the loopback source ({referenceText}). " +
+            "Adjust the Delay sliders while it plays until the copies sound like one speaker. " +
+            "Delay values are saved automatically; the manual test is not an acoustic measurement.";
+        IsSyncBusy = true;
+
+        try
+        {
+            await Task.Run(() => _routingEngine.PlayManualSyncTest(cancellation.Token));
+
+            if (!_disposed)
+            {
+                SyncStatus =
+                    "Manual sync test finished. Repeat it after any delay change and compare the " +
+                    "speakers from the listening position. The configured delays are manual values, " +
+                    "not measured acoustic latencies.";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (!_disposed)
+            {
+                SyncStatus = "Manual sync test cancelled. Configured delays were kept.";
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!_disposed)
+            {
+                SyncStatus = $"Manual sync test failed: {ex.Message}";
+                ErrorMessage = ex.Message;
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_syncCancellation, cancellation))
+            {
+                _syncCancellation = null;
+            }
+
+            cancellation.Dispose();
+
+            if (!_disposed)
+            {
+                IsSyncBusy = false;
+                UpdateRowAvailability();
+                NotifyCommands();
+            }
+        }
+    }
+
+    private void CancelSync()
+    {
+        var cancellation = _syncCancellation;
+        if (cancellation is null)
+        {
+            return;
+        }
+
+        try
+        {
+            cancellation.Cancel();
+            SyncStatus = "Cancelling the synchronization test...";
+        }
+        catch (ObjectDisposedException)
+        {
+            // The test finished between the read and the cancel.
+        }
+    }
+
+    private bool CanResetSync()
+    {
+        return !IsBusy &&
+               !IsSyncBusy &&
+               Devices.Any(device =>
+                   device.DelayMilliseconds > 0 ||
+                   device.MeasuredOffsetMilliseconds is not null ||
+                   !string.IsNullOrWhiteSpace(device.SyncMeasurementMethod) ||
+                   device.HasSyncMeasurement);
+    }
+
+    private void ResetSync()
+    {
+        var answer = MessageBox.Show(
+            "Clear every configured delay and all saved acoustic timing results? " +
+            "The manual sync reference selection is kept. This cannot be undone.",
+            "Reset synchronization",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+
+        if (answer != MessageBoxResult.Yes)
+        {
+            return;
+        }
 
         var previousSuppression = _suppressSelectionHandling;
         _suppressSelectionHandling = true;
@@ -1470,13 +2034,21 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             foreach (var device in Devices)
             {
-                device.IsReference = false;
-                _deviceSettingsStore.RemoveDelay(device.Id);
-
-                if (device.DelayMilliseconds > 0)
+                if (device.DelayMilliseconds != 0)
                 {
                     device.DelayMilliseconds = 0;
                 }
+
+                device.ClearSyncMeasurement();
+
+                // The suppression above bypasses OnDevicePropertyChanged, so apply the
+                // zero delay to a live session explicitly.
+                if (IsRunning)
+                {
+                    _routingEngine.UpdateDelay(device.Id, 0);
+                }
+
+                _deviceSettingsStore.RemoveDelayAndSync(device.Id);
             }
         }
         finally
@@ -1485,9 +2057,60 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         _deviceSettingsStore.Flush();
-
-        CalibrationStatus = "Saved per-device offsets and sync reference were cleared.";
+        SyncDetail = string.Empty;
+        SyncStatus =
+            "Synchronization reset: all delays and acoustic timing results were cleared. " +
+            "The manual reference selection was kept. Start routing again to re-measure.";
+        StatusMessage = "Synchronization delays and measurements reset.";
+        UpdateRowAvailability();
         NotifyCommands();
+    }
+
+    private bool CanSaveSync()
+    {
+        return !IsBusy &&
+               !IsSyncBusy &&
+               Devices.Count > 0;
+    }
+
+    /// <summary>
+    /// Persists the current manual delays plus whatever acoustic metadata is currently
+    /// displayed. Manual delays remain manual: they are never relabeled as measured.
+    /// </summary>
+    private void SaveSync()
+    {
+        foreach (var device in Devices)
+        {
+            _deviceSettingsStore.SaveDelay(device.Id, device.DelayMilliseconds);
+
+            if (device.MeasuredOffsetMilliseconds is double measured &&
+                device.MeasurementConfidencePercent is double confidence)
+            {
+                var method = device.SyncMeasurementMethod ??
+                             (device.IsSource ? SyncMethodSource : SyncMethodDestination);
+                _deviceSettingsStore.SaveSyncMeasurement(
+                    device.Id,
+                    measured,
+                    confidence,
+                    method,
+                    device.SyncMeasuredAtUtc ?? DateTimeOffset.UtcNow);
+            }
+        }
+
+        _deviceSettingsStore.Flush();
+        SyncStatus =
+            $"Saved synchronization settings for {Devices.Count} connected endpoint(s). " +
+            "Delays and any acoustic measurement metadata are stored by persistent Windows " +
+            "endpoint id and restored after a restart or reconnect. Manual delays are not " +
+            "described as acoustic measurements.";
+        StatusMessage = "Synchronization calibration saved by endpoint id.";
+        NotifyCommands();
+    }
+
+    private DeviceViewModel? FindDevice(string deviceId)
+    {
+        return Devices.FirstOrDefault(device =>
+            string.Equals(device.Id, deviceId, StringComparison.OrdinalIgnoreCase));
     }
 
     private void OnStabilityFallback(object? sender, StabilityFallbackEventArgs e)

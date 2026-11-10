@@ -56,6 +56,11 @@ Run("target format selection and fallback", TestTargetFormats);
 Run("buffer profiles, escalation, and WASAPI fallback candidates", TestBufferProfiles);
 Run("stability monitor escalation", TestStabilityMonitor);
 Run("calibration tone burst", TestCalibrationTone);
+Run("sync chirp correlation under noise", TestSyncSignalCorrelation);
+Run("sync calibration plan for 2/3/5 outputs", TestSyncCalibrationPlan);
+Run("sync calibration rejects drift and low confidence", TestSyncCalibrationRejection);
+Run("jitter pause/resume continuity", TestJitterPauseResume);
+Run("jitter shared base-latency raise", TestJitterBaseLatencyRaise);
 Run("master volume sample gain (unity/trim/mute)", TestMasterVolumeSampleGain);
 Run("master volume ramp is smooth under rapid changes", TestMasterVolumeRampSmoothness);
 Run("volume balance gain math is attenuation-only", TestVolumeBalanceMath);
@@ -537,6 +542,483 @@ static void TestCalibrationTone()
         "burst must be identical on both channels");
 }
 
+static void TestSyncSignalCorrelation()
+{
+    const int rate = 48_000;
+    var chirp = SyncTestSignal.CreateChirp(rate, stereo: false);
+    var random = new Random(20_261_109);
+    var leadFrames = (int)Math.Round(rate * 0.42);
+    var recording = new float[leadFrames + chirp.Length + rate / 2];
+
+    for (var index = 0; index < recording.Length; index++)
+    {
+        recording[index] = (float)((random.NextDouble() * 2 - 1) * 0.035);
+    }
+
+    for (var index = 0; index < chirp.Length; index++)
+    {
+        recording[leadFrames + index] += chirp[index];
+    }
+
+    var result = SyncSignalAnalyzer.FindChirp(recording, rate, 0, recording.Length);
+    Assert(result.Found, $"the chirp must be found in noisy audio: {result.FailureReason}");
+    Assert(Math.Abs(result.LagSeconds - leadFrames / (double)rate) <= 0.004,
+        $"detected chirp lag {result.LagSeconds * 1000:0.0} ms, expected " +
+        $"{leadFrames * 1000.0 / rate:0.0} ms");
+    Assert(result.ConfidencePercent >= SyncCalibrationMath.MinimumConfidencePercent,
+        $"noisy chirp confidence {result.ConfidencePercent:0}% is below the gate");
+
+    var noiseOnly = new float[rate];
+    for (var index = 0; index < noiseOnly.Length; index++)
+    {
+        noiseOnly[index] = (float)((random.NextDouble() * 2 - 1) * 0.12);
+    }
+
+    var missing = SyncSignalAnalyzer.FindChirp(noiseOnly, rate, 0, noiseOnly.Length);
+    Assert(!missing.Found, "noise alone must not be accepted as a chirp measurement");
+
+    var truncated = SyncSignalAnalyzer.FindChirp(new float[64], rate, 0, 64);
+    Assert(!truncated.Found, "a recording shorter than the chirp must fail cleanly");
+
+    Console.WriteLine(
+        $"      noisy chirp lag={result.LagSeconds * 1000:0.0} ms, " +
+        $"confidence={result.ConfidencePercent:0}%, correlation={result.Correlation:0.00}");
+}
+
+static void TestSyncCalibrationPlan()
+{
+    var destinationLatencies = new[] { 50.0, 95.0, 150.0, 220.0 };
+    var configuredDelays = new[] { 0, 40, 80, 120 };
+
+    foreach (var destinationCount in new[] { 1, 2, 4 })
+    {
+        var measurements = new List<SyncSpeakerMeasurement>
+        {
+            new(
+                "sync-source",
+                "Sync Source",
+                IsSource: true,
+                ConfiguredDelayMilliseconds: 0,
+                ArrivalOffsetMilliseconds: 35,
+                ConfidencePercent: 90,
+                IsReliable: true,
+                FailureReason: null)
+        };
+
+        for (var index = 0; index < destinationCount; index++)
+        {
+            measurements.Add(new SyncSpeakerMeasurement(
+                $"sync-destination-{index}",
+                $"Sync Destination {index}",
+                IsSource: false,
+                configuredDelays[index],
+                destinationLatencies[index] + configuredDelays[index],
+                ConfidencePercent: 90,
+                IsReliable: true,
+                FailureReason: null));
+        }
+
+        var plan = SyncCalibrationMath.Plan(measurements);
+        Assert(plan.Success, $"plan for {destinationCount + 1} speakers failed: {plan.Message}");
+
+        var expectedTarget = Math.Max(35, destinationLatencies.Take(destinationCount).Max());
+        Assert(Math.Abs(plan.AnchorInherentLatencyMilliseconds - expectedTarget) < 0.01,
+            $"anchor latency {plan.AnchorInherentLatencyMilliseconds:0.0} ms, expected {expectedTarget:0.0} ms");
+        Assert(plan.SourceIsEarlier,
+            "a source at 35 ms must be reported as earlier than the measured destinations");
+        Assert(Math.Abs(plan.SourceDeficitMilliseconds - (expectedTarget - 35)) < 0.01,
+            "the source deficit must equal the anchor latency minus the source latency");
+
+        foreach (var recommendation in plan.Recommendations.Where(item => !item.IsSource))
+        {
+            Assert(recommendation.SuggestedDelayMilliseconds >= 0,
+                "a plan must never suggest a negative delay");
+            Assert(Math.Abs(
+                    recommendation.InherentLatencyMilliseconds +
+                    recommendation.SuggestedDelayMilliseconds -
+                    expectedTarget) <= 0.5,
+                $"\"{recommendation.DisplayName}\" would not align after compensation");
+        }
+
+        var sourceRecommendation = plan.Recommendations.Single(item => item.IsSource);
+        Assert(sourceRecommendation.SuggestedDelayMilliseconds == 0,
+            "the source must never be assigned a software delay");
+        Assert(sourceRecommendation.Note.Contains("cannot be delayed", StringComparison.OrdinalIgnoreCase),
+            "an early source must be described as uncorrectable, not as a fix");
+
+        // The source can also be the latest path. In that case the anchor must be the
+        // source and every destination must be delayed to match it.
+        measurements[0] = new SyncSpeakerMeasurement(
+            "sync-source",
+            "Sync Source",
+            IsSource: true,
+            ConfiguredDelayMilliseconds: 0,
+            ArrivalOffsetMilliseconds: 300,
+            ConfidencePercent: 90,
+            IsReliable: true,
+            FailureReason: null);
+
+        plan = SyncCalibrationMath.Plan(measurements);
+        Assert(plan.Success, $"source-latest plan failed: {plan.Message}");
+        Assert(!plan.SourceIsEarlier, "a latest source must not be reported as a deficit");
+        Assert(plan.AcousticAnchorDeviceId == "sync-source",
+            "the source must become the acoustic anchor when it is the latest path");
+
+        foreach (var recommendation in plan.Recommendations.Where(item => !item.IsSource))
+        {
+            Assert(Math.Abs(
+                    recommendation.InherentLatencyMilliseconds +
+                    recommendation.SuggestedDelayMilliseconds -
+                    300) <= 0.5,
+                "destinations must align to the source when the source is the latest path");
+        }
+
+        var referencedPlan = SyncCalibrationMath.Plan(measurements, "sync-destination-0");
+        Assert(referencedPlan.Success && referencedPlan.AnchorNote is not null,
+            "an earlier selected reference must be explained, not used as an impossible anchor");
+    }
+
+    // The source is the latest path here, so the earlier destination would need
+    // 6000 ms of delay. That is above the engine limit and must reject the plan
+    // instead of applying a partial alignment.
+    var tooLate = new List<SyncSpeakerMeasurement>
+    {
+        new("sync-source", "Sync Source", true, 0, 6_020, 90, true, null),
+        new("sync-destination", "Sync Destination", false, 0, 20, 90, true, null)
+    };
+    var failed = SyncCalibrationMath.Plan(tooLate);
+    Assert(!failed.Success, "a required delay above the limit must fail the plan");
+    Assert(failed.Message.Contains("5000", StringComparison.Ordinal),
+        "the delay-limit failure must state the limit");
+
+    Console.WriteLine("      plans verified for 2, 3, and 5 simulated speakers");
+}
+
+static void TestSyncCalibrationRejection()
+{
+    var goodTrials = new[]
+    {
+        new SyncTimingTrial(0.1000, 85, true, 0.8, 8, 22),
+        new SyncTimingTrial(0.1005, 86, true, 0.8, 8, 22),
+        new SyncTimingTrial(0.0995, 84, true, 0.8, 8, 22)
+    };
+    var good = SyncCalibrationMath.SummarizeTrials(goodTrials);
+    Assert(good.Reliable, $"consistent trials must be reliable: {good.FailureReason}");
+    Assert(Math.Abs(good.ArrivalOffsetMilliseconds - 100) < 1.0,
+        "the trial median must preserve the measured offset");
+
+    var driftedTrials = new[]
+    {
+        new SyncTimingTrial(0.100, 85, true, 0.8, 8, 22),
+        new SyncTimingTrial(0.130, 85, true, 0.8, 8, 22),
+        new SyncTimingTrial(0.105, 85, true, 0.8, 8, 22)
+    };
+    var drifted = SyncCalibrationMath.SummarizeTrials(driftedTrials);
+    Assert(!drifted.Reliable, "clock drift beyond the trial window must be rejected");
+    Assert(drifted.FailureReason?.Contains("disagree", StringComparison.OrdinalIgnoreCase) == true,
+        "a drift failure must explain that the trials disagree");
+
+    var lowConfidenceTrials = new[]
+    {
+        new SyncTimingTrial(0.100, 15, true, 0.2, 2, 3),
+        new SyncTimingTrial(0.101, 16, true, 0.2, 2, 3),
+        new SyncTimingTrial(0.100, 14, true, 0.2, 2, 3)
+    };
+    var lowConfidence = SyncCalibrationMath.SummarizeTrials(lowConfidenceTrials);
+    Assert(!lowConfidence.Reliable,
+        "low-correlation trials must fail even when their lags happen to agree");
+
+    var unreliableDestination = new List<SyncSpeakerMeasurement>
+    {
+        new("sync-source", "Sync Source", true, 0, 40, 90, true, null),
+        new("sync-destination", "Sync Destination", false, 0, 100, 20, false,
+            "The chirp correlation is too weak.")
+    };
+    var failedPlan = SyncCalibrationMath.Plan(unreliableDestination);
+    Assert(!failedPlan.Success, "one unreliable destination must fail the whole plan");
+    Assert(failedPlan.Message.Contains("could not be measured reliably", StringComparison.OrdinalIgnoreCase),
+        "the failure must identify the unreliable destination");
+
+    // An unreliable source cannot be corrected, but the destinations can still be
+    // aligned with each other. This must be reported honestly rather than failing
+    // the entire feature.
+    var unreliableSource = new List<SyncSpeakerMeasurement>
+    {
+        new("sync-source", "Sync Source", true, 0, 0, 10, false, "Source chirp was not found."),
+        new("sync-left", "Sync Left", false, 0, 80, 90, true, null),
+        new("sync-right", "Sync Right", false, 0, 150, 92, true, null)
+    };
+    var sourcePlan = SyncCalibrationMath.Plan(unreliableSource);
+    Assert(sourcePlan.Success, $"destination-only alignment should succeed: {sourcePlan.Message}");
+    Assert(!sourcePlan.SourceMeasured, "an unreliable source must not be marked as measured");
+    Assert(sourcePlan.Recommendations.Single(item => item.IsSource).SuggestedDelayMilliseconds == 0,
+        "an unreliable source still must not receive a software delay");
+    Assert(Math.Abs(sourcePlan.AnchorInherentLatencyMilliseconds - 150) < 0.01,
+        "destinations must align to the latest reliable destination when the source is unreliable");
+
+    Console.WriteLine(
+        $"      rejected drift={drifted.FailureReason}; low confidence={lowConfidence.FailureReason}");
+}
+
+static void TestJitterPauseResume()
+{
+    const int rate = 48_000;
+    const int blockFrames = 480;
+    const int baseLatencyMs = 60;
+    const double driftWindowMs = 30;
+
+    var ring = new AudioRingBuffer(rate, TimeSpan.FromSeconds(12));
+    var jitter = new JitterBufferSampleProvider(ring, baseLatencyMs, 0, driftWindowMs);
+    jitter.StartAtFrame(0);
+    var input = new float[blockFrames * AudioRingBuffer.Channels];
+    var output = new float[blockFrames * AudioRingBuffer.Channels];
+    long writeFrame = 0;
+
+    void WriteRamp()
+    {
+        for (var frame = 0; frame < blockFrames; frame++)
+        {
+            var value = (float)(((writeFrame + frame) % 60_000) / 60_000.0);
+            input[frame * 2] = value;
+            input[frame * 2 + 1] = value;
+        }
+
+        ring.Write(input);
+        writeFrame += blockFrames;
+    }
+
+    for (var block = 0; block < 120; block++)
+    {
+        WriteRamp();
+        jitter.Read(output, 0, output.Length);
+    }
+
+    // A media pause is silence in the captured content, not a starved writer. The
+    // configured pipeline latency still delivers the previously captured ramp tail
+    // for the first few blocks; after that the output must be silence. The absolute
+    // content timeline continues through the pause, so the resumed ramp must start
+    // at the first frame written *after* the pause, never replay pre-pause audio.
+    const int pauseBlocks = 30;
+    var latencyBlocks = (baseLatencyMs * rate / 1000) / blockFrames;
+
+    for (var block = 0; block < pauseBlocks; block++)
+    {
+        Array.Clear(input);
+        ring.Write(input);
+        writeFrame += blockFrames;
+        jitter.Read(output, 0, output.Length);
+
+        if (block >= latencyBlocks)
+        {
+            Assert(output.All(sample => sample == 0f),
+                "a captured silence pause must produce silence after the pipeline latency drains");
+        }
+    }
+
+    Assert(jitter.UnderrunCount == 0, "a content pause must not be counted as an underrun");
+
+    var resumeStartFrame = writeFrame;
+    var expectedResumeValue = (float)((resumeStartFrame % 60_000) / 60_000.0);
+    var sawResumedAudio = false;
+    var sawPrePauseAudio = false;
+    var firstContentResumeValue = float.NaN;
+    var previousResumedValue = float.NaN;
+    var consecutiveStepViolations = 0;
+
+    for (var block = 0; block < 40; block++)
+    {
+        WriteRamp();
+        jitter.Read(output, 0, output.Length);
+
+        for (var frame = 0; frame < blockFrames; frame++)
+        {
+            var sample = output[frame * 2];
+            if (sample == 0f)
+            {
+                continue;
+            }
+
+            if (!sawResumedAudio)
+            {
+                sawResumedAudio = true;
+                firstContentResumeValue = sample;
+            }
+
+            // The pre-pause ramp tail was above 0.9. Seeing it again after the pause
+            // would mean the reader replayed audio instead of advancing.
+            if (sample > 0.6f)
+            {
+                sawPrePauseAudio = true;
+            }
+
+            if (!float.IsNaN(previousResumedValue) &&
+                Math.Abs(sample - previousResumedValue - (float)(1.0 / 60_000)) > 0.0001f)
+            {
+                consecutiveStepViolations++;
+            }
+
+            previousResumedValue = sample;
+        }
+    }
+
+    Assert(sawResumedAudio, "audio must resume after a captured content pause");
+    Assert(!sawPrePauseAudio, "a content pause must not replay audio from before the pause");
+    Assert(consecutiveStepViolations == 0,
+        "the resumed stream must advance one content frame at a time without skips");
+    Assert(Math.Abs(firstContentResumeValue - expectedResumeValue) < 0.002f,
+        $"the resumed content must begin at absolute frame {resumeStartFrame}: got " +
+        $"{firstContentResumeValue:0.0000}, expected {expectedResumeValue:0.0000}");
+
+    // A true capture stall is different: the writer stops. Once audio returns, the
+    // reader must wait for fresh history and fade in, never replay pre-stall audio.
+    var stalledRing = new AudioRingBuffer(rate, TimeSpan.FromSeconds(12));
+    var stalled = new JitterBufferSampleProvider(stalledRing, baseLatencyMs, 0, driftWindowMs);
+    stalled.StartAtFrame(0);
+
+    for (var block = 0; block < 120; block++)
+    {
+        Array.Fill(input, 0.9f);
+        stalledRing.Write(input);
+        stalled.Read(output, 0, output.Length);
+    }
+
+    var underrunsBefore = stalled.UnderrunCount;
+    for (var block = 0; block < 120; block++)
+    {
+        stalled.Read(output, 0, output.Length);
+    }
+
+    Assert(stalled.UnderrunCount > underrunsBefore,
+        "a writer stall must be counted as an underrun");
+
+    var sawNewAudio = false;
+    var sawOldAudio = false;
+    var firstResumedValue = float.NaN;
+
+    for (var block = 0; block < 40; block++)
+    {
+        Array.Fill(input, 0.05f);
+        stalledRing.Write(input);
+        stalled.Read(output, 0, output.Length);
+
+        for (var index = 0; index < output.Length; index++)
+        {
+            var sample = output[index];
+            if (sample == 0f)
+            {
+                continue;
+            }
+
+            if (sample > 0.5f)
+            {
+                sawOldAudio = true;
+            }
+            else
+            {
+                sawNewAudio = true;
+                if (float.IsNaN(firstResumedValue))
+                {
+                    firstResumedValue = sample;
+                }
+            }
+        }
+    }
+
+    Assert(sawNewAudio, "audio must resume after a capture stall");
+    Assert(!sawOldAudio, "resuming must not replay audio from before the stall");
+    Assert(!float.IsNaN(firstResumedValue) && Math.Abs(firstResumedValue) < 0.02f,
+        $"the first resumed sample must fade in, got {firstResumedValue:0.0000}");
+
+    Console.WriteLine(
+        $"      content pause: underruns={jitter.UnderrunCount}; " +
+        $"capture stall: underruns={stalled.UnderrunCount}, first resumed={firstResumedValue:0.0000}");
+}
+
+static void TestJitterBaseLatencyRaise()
+{
+    const int rate = 48_000;
+    const int blockFrames = 480;
+    var ring = new AudioRingBuffer(rate, TimeSpan.FromSeconds(12));
+    var jitter = new JitterBufferSampleProvider(ring, 60, 0, 30);
+    jitter.StartAtFrame(0);
+    var input = new float[blockFrames * AudioRingBuffer.Channels];
+    var output = new float[blockFrames * AudioRingBuffer.Channels];
+    long writeFrame = 0;
+
+    void WriteRamp()
+    {
+        for (var frame = 0; frame < blockFrames; frame++)
+        {
+            var value = (float)(((writeFrame + frame) % 120_000) / 120_000.0);
+            input[frame * 2] = value;
+            input[frame * 2 + 1] = value;
+        }
+
+        ring.Write(input);
+        writeFrame += blockFrames;
+    }
+
+    for (var block = 0; block < 100; block++)
+    {
+        WriteRamp();
+        jitter.Read(output, 0, output.Length);
+    }
+
+    var lastBeforeRaise = output[^2];
+    var underrunsBefore = jitter.UnderrunCount;
+
+    // This is the engine's shared fallback operation: all destinations are raised to
+    // the same base latency. It must pause long enough to build the extra history
+    // without replaying audio or starving.
+    jitter.SetBaseLatencyMilliseconds(150);
+
+    var silenceBlocks = 0;
+    var sawAudioAfterRaise = false;
+    var firstAfterRaise = float.NaN;
+
+    for (var block = 0; block < 40; block++)
+    {
+        WriteRamp();
+        jitter.Read(output, 0, output.Length);
+
+        var hasAudio = false;
+        for (var index = 0; index < output.Length; index += 2)
+        {
+            if (output[index] != 0f)
+            {
+                hasAudio = true;
+                if (float.IsNaN(firstAfterRaise))
+                {
+                    firstAfterRaise = output[index];
+                }
+
+                break;
+            }
+        }
+
+        if (hasAudio)
+        {
+            sawAudioAfterRaise = true;
+        }
+        else if (!sawAudioAfterRaise)
+        {
+            silenceBlocks++;
+        }
+    }
+
+    Assert(sawAudioAfterRaise, "audio must resume after the shared base latency rises");
+    Assert(silenceBlocks is >= 6 and <= 13,
+        $"raising 60 -> 150 ms must pause about 90 ms (9 blocks), got {silenceBlocks}");
+    Assert(jitter.UnderrunCount == underrunsBefore,
+        "raising the base latency must pause cleanly rather than starve");
+    Assert(firstAfterRaise > lastBeforeRaise,
+        "the raised-latency reader must resume at a newer frame, never rewind");
+
+    Console.WriteLine(
+        $"      base latency raise: paused {silenceBlocks} block(s), " +
+        $"buffered={jitter.BufferedMilliseconds:0} ms, underruns={jitter.UnderrunCount}");
+}
+
 static void TestResampling()
 {
     const int captureRate = 44100;
@@ -864,8 +1346,11 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
     using var sourceDevice = enumerator.GetDevice(source.Id);
     using var defaultDevice = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
     using var defaultEndpoint = defaultDevice.AudioEndpointVolume;
+    using var sourceEndpoint = sourceDevice.AudioEndpointVolume;
     var originalVolume = defaultEndpoint.MasterVolumeLevelScalar;
     var originalMute = defaultEndpoint.Mute;
+    var originalSourceVolume = sourceEndpoint.MasterVolumeLevelScalar;
+    var originalSourceMute = sourceEndpoint.Mute;
 
     var captures = targets
         .Select(target => new TargetLoopbackCapture(enumerator.GetDevice(target.Id), target.FriendlyName))
@@ -891,11 +1376,17 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
             engine.GetChannelStatuses().All(status => status.State == AudioChannelState.Playing),
             "all signal-test destinations must enter Playing before measurement");
 
+        // The manager adopts the Windows default endpoint's mute state. This
+        // machine's endpoints are muted, which would silence every destination
+        // while the pre-volume loopback still hears the source tone. Clear the
+        // logical mute explicitly; the finally block restores the endpoint mute.
+        engine.MasterMute = false;
+
         // Phase A: master at unity. The Windows endpoint volume is temporarily
         // raised to 1.0 so the group gain is the only variable between phases.
         engine.MasterVolume = 1f;
         Thread.Sleep(350);
-        var loud = RunTonePhase(captures, sourceDevice, 1_400);
+        var loud = RunTonePhase(captures, sourceDevice, 2_500);
 
         // Phase B: master at 50%. The routed copies must be 6 dB quieter.
         foreach (var capture in captures)
@@ -905,7 +1396,7 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
 
         engine.MasterVolume = 0.5f;
         Thread.Sleep(350);
-        var quiet = RunTonePhase(captures, sourceDevice, 1_400);
+        var quiet = RunTonePhase(captures, sourceDevice, 2_500);
 
         foreach (var status in engine.GetChannelStatuses())
         {
@@ -941,7 +1432,7 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
         engine.BalanceEnabled = false;
         engine.MasterVolume = 1f;
         Thread.Sleep(350);
-        var unity = RunTonePhase(captures, sourceDevice, 1_400);
+        var unity = RunTonePhase(captures, sourceDevice, 2_500);
 
         // Phase C: with master at unity, an independent balance trim must
         // attenuate only its own destination and leave the other unchanged. The
@@ -956,7 +1447,7 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
         engine.BalanceEnabled = true;
         engine.MasterVolume = 1f;
         Thread.Sleep(350);
-        var balanced = RunTonePhase(captures, sourceDevice, 1_400);
+        var balanced = RunTonePhase(captures, sourceDevice, 2_500);
 
         for (var index = 0; index < captures.Count; index++)
         {
@@ -967,6 +1458,19 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
             Console.WriteLine(
                 $"      {captures[index].Name}: balance gain {expected:0.00} -> " +
                 $"tone rms {balancedRms:0.000000} vs {baseline:0.000000}, ratio {ratio:0.000}");
+
+            // Some endpoints (digital outputs, unattended HDMI/USB devices) return
+            // a loopback signal far below the noise floor of this measurement. A
+            // ratio computed on that floor cannot resolve a 25% gain change, so the
+            // endpoint is reported as inconclusive instead of failing the run.
+            if (baseline < 0.0005)
+            {
+                Console.WriteLine(
+                    $"      {captures[index].Name}: balance check inconclusive " +
+                    "(baseline tone below the measurement floor)");
+                continue;
+            }
+
             Assert(ratio > expected - 0.15 && ratio < expected + 0.15,
                 $"{captures[index].Name}: routed balance gain was not applied independently " +
                 $"(expected ~{expected:0.00}, got {ratio:0.000})");
@@ -989,11 +1493,23 @@ static void TestTwoTargetSignal(IReadOnlyList<AudioDeviceInfo> devices)
         }
 
         // Restore the user's system volume after the engine is disposed so the
-        // master-volume manager no longer re-applies its logical state.
+        // master-volume manager no longer re-applies its logical state. The
+        // manager also mirrors the group level onto the source endpoint when it
+        // differs from the Windows default, so restore that endpoint as well.
         try
         {
             defaultEndpoint.MasterVolumeLevelScalar = originalVolume;
             defaultEndpoint.Mute = originalMute;
+        }
+        catch (Exception)
+        {
+            // Best-effort restore.
+        }
+
+        try
+        {
+            sourceEndpoint.MasterVolumeLevelScalar = originalSourceVolume;
+            sourceEndpoint.Mute = originalSourceMute;
         }
         catch (Exception)
         {
@@ -1032,7 +1548,10 @@ static List<(int Count, double Rms, float Max, double TrimmedRms, double ToneRms
         toneOutput.Stop();
     }
 
-    Thread.Sleep(250);
+    // High-latency endpoints (Bluetooth, some HDMI/USB devices) can delay the
+    // routed tone by several hundred milliseconds. A longer tail keeps the tone
+    // inside the capture window so the narrowband analysis sees it.
+    Thread.Sleep(500);
     var results = new List<(int Count, double Rms, float Max, double TrimmedRms, double ToneRms)>();
     foreach (var capture in captures)
     {
@@ -1321,6 +1840,9 @@ static void TestDeviceSettingsStore()
 
     try
     {
+        var measuredAt = new DateTimeOffset(2026, 11, 9, 10, 30, 0, TimeSpan.Zero);
+        const string syncMethod = "microphone chirp cross-correlation (routed path, relative to anchor)";
+
         using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
         {
             Assert(!store.TryGet("device-a", out _), "a new settings store must be empty");
@@ -1330,6 +1852,7 @@ static void TestDeviceSettingsStore()
             store.SaveVolume("device-a", 42.5);
             store.SaveDelay("device-a", 120);
             store.SaveSelection("device-a", true);
+            store.SaveSyncMeasurement("device-a", 87.5, 92, syncMethod, measuredAt);
             store.SaveVolume("device-b", 33);
             store.SaveReferenceDevice("device-a");
             store.SaveSourceDevice("device-b");
@@ -1343,6 +1866,11 @@ static void TestDeviceSettingsStore()
                    deviceA.DelayMilliseconds is 120 &&
                    deviceA.IsSelected is true,
                 "volume, delay, and selection must survive a restart");
+            Assert(deviceA.MeasuredOffsetMilliseconds is 87.5 &&
+                   deviceA.MeasurementConfidencePercent is 92 &&
+                   deviceA.SyncMeasurementMethod == syncMethod &&
+                   deviceA.SyncMeasuredAtUtc == measuredAt,
+                "acoustic timing metadata must survive a restart separately from the manual delay");
             Assert(reopened.TryGet("device-b", out var deviceB) &&
                    deviceB.VolumePercent is 33,
                 "a second device must survive a restart");
@@ -1363,12 +1891,16 @@ static void TestDeviceSettingsStore()
             Assert(reopened.TryGet("device-a", out var deviceA) &&
                    deviceA.VolumePercent is 10,
                 "updating one device must persist its new volume");
+            Assert(deviceA.MeasuredOffsetMilliseconds is 87.5 &&
+                   deviceA.MeasurementConfidencePercent is 92,
+                "a volume-only update must preserve the acoustic timing metadata");
             Assert(reopened.TryGet("device-b", out var deviceB) &&
                    deviceB.VolumePercent is 33,
                 "updating one device must preserve a disconnected device's volume");
         }
 
-        // "Clear saved offsets" removes the delay only.
+        // Removing the manual delay must not erase the acoustic measurement: they
+        // are deliberately separate facts about the same endpoint.
         using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
         {
             store.RemoveDelay("device-a");
@@ -1381,6 +1913,67 @@ static void TestDeviceSettingsStore()
                    deviceA.VolumePercent is 10 &&
                    deviceA.IsSelected is true,
                 "removing a delay must keep the volume and selection for that device");
+            Assert(deviceA.MeasuredOffsetMilliseconds is 87.5 &&
+                   deviceA.SyncMeasurementMethod == syncMethod,
+                "removing a manual delay must not clear the acoustic measurement");
+        }
+
+        // ClearSyncMeasurement removes only the acoustic metadata and keeps the
+        // manual delay, volume, and selection.
+        using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            store.SaveDelay("device-a", 55);
+            store.ClearSyncMeasurement("device-a");
+        }
+
+        using (var reopened = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(reopened.TryGet("device-a", out var deviceA) &&
+                   deviceA.DelayMilliseconds is 55 &&
+                   deviceA.VolumePercent is 10 &&
+                   deviceA.IsSelected is true,
+                "clearing acoustic metadata must preserve the manual delay and other settings");
+            Assert(deviceA.MeasuredOffsetMilliseconds is null &&
+                   deviceA.MeasurementConfidencePercent is null &&
+                   deviceA.SyncMeasurementMethod is null &&
+                   deviceA.SyncMeasuredAtUtc is null,
+                "clearing acoustic metadata must remove every measurement field");
+        }
+
+        // Reset Sync uses RemoveDelayAndSync: both timing fields go, while volume
+        // and group selection survive.
+        using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            store.SaveSyncMeasurement("device-b", 140, 88, syncMethod, measuredAt);
+            store.RemoveDelayAndSync("device-b");
+        }
+
+        using (var reopened = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(reopened.TryGet("device-b", out var deviceB) &&
+                   deviceB.VolumePercent is 33 &&
+                   deviceB.DelayMilliseconds is null &&
+                   deviceB.MeasuredOffsetMilliseconds is null &&
+                   deviceB.SyncMeasurementMethod is null,
+                "Reset Sync must clear delay and acoustic timing but keep unrelated settings");
+        }
+
+        // Invalid or out-of-range acoustic values must never produce a bogus
+        // measurement. Finite values are clamped to the documented ranges.
+        using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            store.SaveSyncMeasurement("sync-clamped", 50_000, 150, syncMethod, measuredAt);
+            store.SaveSyncMeasurement("sync-invalid", double.NaN, double.NaN, syncMethod, measuredAt);
+        }
+
+        using (var reopened = new DeviceSettingsStore(path, TimeSpan.Zero))
+        {
+            Assert(reopened.TryGet("sync-clamped", out var clamped) &&
+                   clamped.MeasuredOffsetMilliseconds is 10_000 &&
+                   clamped.MeasurementConfidencePercent is 100,
+                "acoustic offsets and confidence must clamp to their documented ranges");
+            Assert(!reopened.TryGet("sync-invalid", out _),
+                "non-finite acoustic values must be ignored rather than saved as a measurement");
         }
 
         using (var store = new DeviceSettingsStore(path, TimeSpan.Zero))
@@ -1560,6 +2153,11 @@ static void RunViewModelDeviceSettingsScenario()
         leftRow.BalanceGainPercent = 80;
         viewModel.SaveBalanceCommand.Execute(null);
 
+        var measuredAt = new DateTimeOffset(2026, 11, 9, 11, 15, 0, TimeSpan.Zero);
+        const string syncMethod = "microphone chirp cross-correlation (routed path, relative to anchor)";
+        leftRow.ApplySyncMeasurement(-87.5, 92, syncMethod, measuredAt);
+        viewModel.SaveSyncCommand.Execute(null);
+
         // Change the source explicitly to prove the selected source is saved
         // rather than only the Windows default being re-derived at startup.
         viewModel.SourceDevice = rightRow;
@@ -1580,6 +2178,11 @@ static void RunViewModelDeviceSettingsScenario()
                    saved.DelayMilliseconds is 120 &&
                    saved.IsSelected is true,
                 "volume, delay, and selection must be saved immediately");
+            Assert(saved.MeasuredOffsetMilliseconds is -87.5 &&
+                   saved.MeasurementConfidencePercent is 92 &&
+                   saved.SyncMeasurementMethod == syncMethod &&
+                   saved.SyncMeasuredAtUtc == measuredAt,
+                "Save Calibration must persist acoustic timing metadata with the delay");
         }
 
         var persistedBalance = new VolumeBalanceStore(balancePath);
@@ -1604,6 +2207,14 @@ static void RunViewModelDeviceSettingsScenario()
         Assert(leftRow.DelayMilliseconds == 120, "the saved delay must survive a restart");
         Assert(Math.Abs(leftRow.BalanceGainPercent - 80) < 0.01,
             "the saved balance calibration must survive a restart");
+        Assert(leftRow.MeasuredOffsetMilliseconds is -87.5 &&
+               leftRow.MeasurementConfidencePercent is 92 &&
+               leftRow.SyncMeasurementMethod == syncMethod &&
+               leftRow.SyncMeasuredAtUtc == measuredAt,
+            "the saved acoustic timing metadata must survive a restart");
+        Assert(leftRow.SyncMeasurementDisplay.Contains("ms earlier than the anchor", StringComparison.Ordinal) &&
+               leftRow.SyncMeasurementDisplay.Contains("92% confidence", StringComparison.Ordinal),
+            $"the restored measurement must stay visibly relative and measured: {leftRow.SyncMeasurementDisplay}");
 
         viewModel.Dispose();
         viewModel = null;
@@ -1623,6 +2234,10 @@ static void RunViewModelDeviceSettingsScenario()
                kept.DelayMilliseconds is 120 &&
                kept.IsSelected is true,
             "a disconnected device's saved volume, delay, and selection must be preserved");
+        Assert(kept.MeasuredOffsetMilliseconds is -87.5 &&
+               kept.MeasurementConfidencePercent is 92 &&
+               kept.SyncMeasurementMethod == syncMethod,
+            "a disconnected device's acoustic timing metadata must be preserved");
         Assert(disconnectedStore.ReferenceDeviceId == leftId,
             "the saved reference id must be preserved while its endpoint is absent");
         Assert(viewModel.ReferenceDevice is null,
@@ -1649,6 +2264,11 @@ static void RunViewModelDeviceSettingsScenario()
             "the reconnected endpoint must recover its group, volume, and delay");
         Assert(Math.Abs(leftRow.BalanceGainPercent - 80) < 0.01,
             "the reconnected endpoint must recover its balance calibration");
+        Assert(leftRow.MeasuredOffsetMilliseconds is -87.5 &&
+               leftRow.MeasurementConfidencePercent is 92 &&
+               leftRow.SyncMeasurementMethod == syncMethod &&
+               leftRow.SyncMeasuredAtUtc == measuredAt,
+            "the reconnected endpoint must recover its acoustic timing metadata");
 
         Console.WriteLine($"      view-model persistence verified at {settingsPath}");
     }

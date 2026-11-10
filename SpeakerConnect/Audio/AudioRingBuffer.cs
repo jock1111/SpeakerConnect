@@ -11,6 +11,7 @@ public sealed class AudioRingBuffer
     private readonly object _gate = new();
     private readonly float[] _data;
     private readonly int _capacityFrames;
+    private readonly List<ScheduledSignal> _scheduledSignals = new();
     private long _writeFrame;
 
     public AudioRingBuffer(int sampleRate, TimeSpan capacity)
@@ -53,6 +54,57 @@ public sealed class AudioRingBuffer
         }
     }
 
+    /// <summary>
+    /// Copies a range of previously captured frames for offline timing analysis.
+    /// Returns false when the requested range is not entirely retained; the caller
+    /// must treat that as a failed measurement rather than correlating stale data.
+    /// </summary>
+    public bool TryCopyFrames(long startFrame, int frameCount, float[] destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+
+        if (frameCount < 0 || startFrame < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(frameCount));
+        }
+
+        if (destination.Length < frameCount * Channels)
+        {
+            throw new ArgumentException("The destination buffer is too small.", nameof(destination));
+        }
+
+        lock (_gate)
+        {
+            var oldest = Math.Max(0, _writeFrame - _capacityFrames);
+            if (startFrame < oldest || startFrame + frameCount > _writeFrame)
+            {
+                return false;
+            }
+
+            var start = (int)(startFrame % _capacityFrames);
+            var firstFrames = Math.Min(frameCount, _capacityFrames - start);
+            Array.Copy(
+                _data,
+                start * Channels,
+                destination,
+                0,
+                firstFrames * Channels);
+
+            var remainingFrames = frameCount - firstFrames;
+            if (remainingFrames > 0)
+            {
+                Array.Copy(
+                    _data,
+                    0,
+                    destination,
+                    firstFrames * Channels,
+                    remainingFrames * Channels);
+            }
+
+            return true;
+        }
+    }
+
     public long OldestFrame
     {
         get
@@ -61,6 +113,58 @@ public sealed class AudioRingBuffer
             {
                 return Math.Max(0, _writeFrame - _capacityFrames);
             }
+        }
+    }
+
+    /// <summary>
+    /// Schedules a stereo test signal to be mixed into the shared content stream at
+    /// an exact future frame. The capture writer mixes it while writing that frame,
+    /// so the signal is heard on every destination with the same content-time anchor
+    /// and the destination's normal configured delay. The start frame must be far
+    /// enough ahead that readers have not already passed it; the routing engine uses
+    /// a 300 ms lead, which is larger than every profile's base latency.
+    /// </summary>
+    public long ScheduleSignal(long startFrame, ReadOnlySpan<float> interleavedSamples)
+    {
+        var frames = interleavedSamples.Length / Channels;
+        if (frames <= 0)
+        {
+            throw new ArgumentException("The scheduled signal is empty.", nameof(interleavedSamples));
+        }
+
+        if (startFrame < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(startFrame));
+        }
+
+        var copy = interleavedSamples.ToArray();
+        lock (_gate)
+        {
+            if (startFrame < _writeFrame)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(startFrame),
+                    "The scheduled signal starts in the past.");
+            }
+
+            if (startFrame - _writeFrame > _capacityFrames - frames)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(startFrame),
+                    "The scheduled signal does not fit in the ring buffer's future capacity.");
+            }
+
+            _scheduledSignals.Add(new ScheduledSignal(startFrame, copy));
+            return startFrame;
+        }
+    }
+
+    /// <summary>Drops any test signals that have not yet been mixed.</summary>
+    public void ClearScheduledSignals()
+    {
+        lock (_gate)
+        {
+            _scheduledSignals.Clear();
         }
     }
 
@@ -81,7 +185,8 @@ public sealed class AudioRingBuffer
 
         lock (_gate)
         {
-            var start = (int)(_writeFrame % _capacityFrames);
+            var blockStart = _writeFrame;
+            var start = (int)(blockStart % _capacityFrames);
             var firstFrames = Math.Min(frames, _capacityFrames - start);
 
             samples.Slice(0, firstFrames * Channels)
@@ -95,7 +200,80 @@ public sealed class AudioRingBuffer
             }
 
             _writeFrame += frames;
+
+            if (_scheduledSignals.Count > 0)
+            {
+                MixScheduledSignalsLocked(blockStart, frames);
+            }
         }
+    }
+
+    private void MixScheduledSignalsLocked(long blockStart, int blockFrames)
+    {
+        var blockEnd = blockStart + blockFrames;
+        for (var index = _scheduledSignals.Count - 1; index >= 0; index--)
+        {
+            var signal = _scheduledSignals[index];
+            var signalEnd = signal.StartFrame + signal.Frames;
+            var overlapStart = Math.Max(blockStart, signal.StartFrame);
+            var overlapEnd = Math.Min(blockEnd, signalEnd);
+
+            if (overlapEnd > overlapStart)
+            {
+                var destinationFrame = overlapStart - blockStart;
+                var sourceFrame = (int)(overlapStart - signal.StartFrame);
+                var overlapFrames = (int)(overlapEnd - overlapStart);
+                MixFramesLocked(destinationFrame, signal.Samples, sourceFrame, overlapFrames);
+            }
+
+            if (signalEnd <= blockEnd)
+            {
+                _scheduledSignals.RemoveAt(index);
+            }
+        }
+    }
+
+    private void MixFramesLocked(
+        long destinationFrame,
+        float[] source,
+        int sourceFrame,
+        int frames)
+    {
+        var start = (int)(destinationFrame % _capacityFrames);
+        var firstFrames = Math.Min(frames, _capacityFrames - start);
+        var sourceStart = sourceFrame * Channels;
+        var destinationStart = start * Channels;
+
+        for (var sample = 0; sample < firstFrames * Channels; sample++)
+        {
+            _data[destinationStart + sample] += source[sourceStart + sample];
+        }
+
+        var remainingFrames = frames - firstFrames;
+        if (remainingFrames > 0)
+        {
+            var remainingSourceStart = (sourceFrame + firstFrames) * Channels;
+            for (var sample = 0; sample < remainingFrames * Channels; sample++)
+            {
+                _data[sample] += source[remainingSourceStart + sample];
+            }
+        }
+    }
+
+    private sealed class ScheduledSignal
+    {
+        public ScheduledSignal(long startFrame, float[] samples)
+        {
+            StartFrame = startFrame;
+            Samples = samples;
+            Frames = samples.Length / Channels;
+        }
+
+        public long StartFrame { get; }
+
+        public float[] Samples { get; }
+
+        public int Frames { get; }
     }
 
     /// <summary>

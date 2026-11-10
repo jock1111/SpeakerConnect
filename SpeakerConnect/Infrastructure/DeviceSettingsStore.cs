@@ -9,11 +9,19 @@ namespace SpeakerConnect.Infrastructure;
 /// A saved preference snapshot for one persistent Windows endpoint id. Null
 /// values mean "the user never saved this setting"; they must never be treated
 /// as defaults that overwrite another device's saved data.
+///
+/// The sync fields describe an <em>acoustic</em> measurement made with the
+/// microphone. They are deliberately separate from <see cref="DelayMilliseconds"/>:
+/// a manual delay is not an acoustic measurement and must not be presented as one.
 /// </summary>
 public sealed record DevicePreference(
     double? VolumePercent,
     int? DelayMilliseconds,
-    bool? IsSelected);
+    bool? IsSelected,
+    double? MeasuredOffsetMilliseconds = null,
+    double? MeasurementConfidencePercent = null,
+    string? SyncMeasurementMethod = null,
+    DateTimeOffset? SyncMeasuredAtUtc = null);
 
 /// <summary>
 /// Persists per-endpoint volume, manual synchronization delay, the last selected
@@ -31,7 +39,7 @@ public sealed class DeviceSettingsStore : IDisposable
     public const string FileName = "device-settings.json";
     public const string LegacyFileName = "sync-offsets.json";
 
-    private const int CurrentVersion = 2;
+    private const int CurrentVersion = 3;
     private static readonly TimeSpan DefaultAutoSaveDelay = TimeSpan.FromMilliseconds(300);
     private static readonly DevicePreference EmptyPreference = new(null, null, null);
 
@@ -154,6 +162,91 @@ public sealed class DeviceSettingsStore : IDisposable
     public void SaveSelection(string deviceId, bool isSelected)
     {
         UpdateDevice(deviceId, volumePercent: null, delayMilliseconds: null, isSelected);
+    }
+
+    /// <summary>
+    /// Persists an acoustic timing result for one endpoint. The measured offset is
+    /// inherent path latency (software buffer + endpoint/hardware + acoustic), not a
+    /// user-entered delay, so the UI can distinguish measured from manual timing.
+    /// </summary>
+    public void SaveSyncMeasurement(
+        string deviceId,
+        double measuredOffsetMilliseconds,
+        double confidencePercent,
+        string method,
+        DateTimeOffset measuredAtUtc)
+    {
+        if (!double.IsFinite(measuredOffsetMilliseconds) ||
+            !double.IsFinite(confidencePercent))
+        {
+            return;
+        }
+
+        UpdateDevice(
+            deviceId,
+            volumePercent: null,
+            delayMilliseconds: null,
+            isSelected: null,
+            measuredOffsetMilliseconds: Math.Clamp(measuredOffsetMilliseconds, -10_000, 10_000),
+            measurementConfidencePercent: Math.Clamp(confidencePercent, 0, 100),
+            syncMeasurementMethod: NormalizeMethod(method),
+            syncMeasuredAtUtc: measuredAtUtc);
+    }
+
+    /// <summary>Removes only the acoustic measurement metadata for one endpoint.</summary>
+    public void ClearSyncMeasurement(string deviceId)
+    {
+        var normalized = NormalizeId(deviceId);
+        lock (_gate)
+        {
+            if (_disposed ||
+                normalized is null ||
+                !_settings.Devices.TryGetValue(normalized, out var entry) ||
+                !entry.HasSyncMeasurement)
+            {
+                return;
+            }
+
+            entry.MeasuredOffsetMilliseconds = null;
+            entry.MeasurementConfidencePercent = null;
+            entry.SyncMeasurementMethod = null;
+            entry.SyncMeasuredAtUtc = null;
+
+            if (entry.IsEmpty)
+            {
+                _settings.Devices.Remove(normalized);
+            }
+
+            MarkDirtyLocked();
+        }
+    }
+
+    /// <summary>Clears the saved delay and acoustic timing metadata, preserving volume/selection.</summary>
+    public void RemoveDelayAndSync(string deviceId)
+    {
+        var normalized = NormalizeId(deviceId);
+        lock (_gate)
+        {
+            if (_disposed ||
+                normalized is null ||
+                !_settings.Devices.TryGetValue(normalized, out var entry))
+            {
+                return;
+            }
+
+            entry.DelayMilliseconds = null;
+            entry.MeasuredOffsetMilliseconds = null;
+            entry.MeasurementConfidencePercent = null;
+            entry.SyncMeasurementMethod = null;
+            entry.SyncMeasuredAtUtc = null;
+
+            if (entry.IsEmpty)
+            {
+                _settings.Devices.Remove(normalized);
+            }
+
+            MarkDirtyLocked();
+        }
     }
 
     /// <summary>Updates volume and delay in one write; used when flushing coalesced slider changes.</summary>
@@ -281,7 +374,11 @@ public sealed class DeviceSettingsStore : IDisposable
         string deviceId,
         double? volumePercent,
         int? delayMilliseconds,
-        bool? isSelected)
+        bool? isSelected,
+        double? measuredOffsetMilliseconds = null,
+        double? measurementConfidencePercent = null,
+        string? syncMeasurementMethod = null,
+        DateTimeOffset? syncMeasuredAtUtc = null)
     {
         var normalized = NormalizeId(deviceId);
         if (normalized is null)
@@ -315,6 +412,26 @@ public sealed class DeviceSettingsStore : IDisposable
             if (isSelected is bool selected)
             {
                 entry.IsSelected = selected;
+            }
+
+            if (measuredOffsetMilliseconds is double offset && double.IsFinite(offset))
+            {
+                entry.MeasuredOffsetMilliseconds = Math.Clamp(offset, -10_000, 10_000);
+            }
+
+            if (measurementConfidencePercent is double confidence && double.IsFinite(confidence))
+            {
+                entry.MeasurementConfidencePercent = Math.Clamp(confidence, 0, 100);
+            }
+
+            if (syncMeasurementMethod is not null)
+            {
+                entry.SyncMeasurementMethod = NormalizeMethod(syncMeasurementMethod);
+            }
+
+            if (syncMeasuredAtUtc is DateTimeOffset measuredAt)
+            {
+                entry.SyncMeasuredAtUtc = measuredAt;
             }
 
             MarkDirtyLocked();
@@ -456,6 +573,24 @@ public sealed class DeviceSettingsStore : IDisposable
                 entry.IsSelected = selected;
             }
 
+            if (pair.Value.MeasuredOffsetMilliseconds is double measuredOffset &&
+                double.IsFinite(measuredOffset))
+            {
+                entry.MeasuredOffsetMilliseconds = Math.Clamp(measuredOffset, -10_000, 10_000);
+            }
+
+            if (pair.Value.MeasurementConfidencePercent is double confidence &&
+                double.IsFinite(confidence))
+            {
+                entry.MeasurementConfidencePercent = Math.Clamp(confidence, 0, 100);
+            }
+
+            entry.SyncMeasurementMethod = NormalizeMethod(pair.Value.SyncMeasurementMethod);
+            if (pair.Value.SyncMeasuredAtUtc is DateTimeOffset measuredAt)
+            {
+                entry.SyncMeasuredAtUtc = measuredAt;
+            }
+
             if (!entry.IsEmpty)
             {
                 normalized.Devices[deviceId] = entry;
@@ -491,6 +626,17 @@ public sealed class DeviceSettingsStore : IDisposable
         return deviceId.Trim();
     }
 
+    private static string? NormalizeMethod(string? method)
+    {
+        if (string.IsNullOrWhiteSpace(method))
+        {
+            return null;
+        }
+
+        var trimmed = method.Trim();
+        return trimmed.Length <= 80 ? trimmed : trimmed[..80];
+    }
+
     private sealed class SettingsFile
     {
         public int Version { get; set; } = CurrentVersion;
@@ -511,12 +657,35 @@ public sealed class DeviceSettingsStore : IDisposable
 
         public bool? IsSelected { get; set; }
 
+        public double? MeasuredOffsetMilliseconds { get; set; }
+
+        public double? MeasurementConfidencePercent { get; set; }
+
+        public string? SyncMeasurementMethod { get; set; }
+
+        public DateTimeOffset? SyncMeasuredAtUtc { get; set; }
+
+        [JsonIgnore]
+        public bool HasSyncMeasurement =>
+            MeasuredOffsetMilliseconds is not null ||
+            MeasurementConfidencePercent is not null ||
+            SyncMeasurementMethod is not null ||
+            SyncMeasuredAtUtc is not null;
+
         [JsonIgnore]
         public bool IsEmpty => VolumePercent is null &&
                                DelayMilliseconds is null &&
-                               IsSelected is null;
+                               IsSelected is null &&
+                               !HasSyncMeasurement;
 
         public DevicePreference ToPreference() =>
-            new(VolumePercent, DelayMilliseconds, IsSelected);
+            new(
+                VolumePercent,
+                DelayMilliseconds,
+                IsSelected,
+                MeasuredOffsetMilliseconds,
+                MeasurementConfidencePercent,
+                SyncMeasurementMethod,
+                SyncMeasuredAtUtc);
     }
 }

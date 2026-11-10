@@ -21,7 +21,6 @@ public sealed class JitterBufferSampleProvider : ISampleProvider
     private const int MaxFadeInFrames = 240;
 
     private readonly AudioRingBuffer _buffer;
-    private readonly long _baseLatencyFrames;
     private readonly long _maxDriftFrames;
     private readonly long _maxPacingFramesPerCall;
     private readonly long _maxPacingBudgetFrames;
@@ -42,6 +41,8 @@ public sealed class JitterBufferSampleProvider : ISampleProvider
     private long _pendingInsertFrames;
 
     private int _delayMilliseconds;
+    private int _baseLatencyMilliseconds;
+    private long _baseLatencyFrames;
     private long _underrunCount;
     private long _droppedFrameCount;
     private long _shedFrameCount;
@@ -71,7 +72,7 @@ public sealed class JitterBufferSampleProvider : ISampleProvider
         }
 
         WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(buffer.SampleRate, Channels);
-        BaseLatencyMilliseconds = baseLatencyMilliseconds;
+        _baseLatencyMilliseconds = baseLatencyMilliseconds;
         _baseLatencyFrames = (long)Math.Round(buffer.SampleRate * baseLatencyMilliseconds / 1000.0);
         _maxDriftFrames = (long)Math.Round(buffer.SampleRate * driftWindowMilliseconds / 1000.0);
 
@@ -94,7 +95,14 @@ public sealed class JitterBufferSampleProvider : ISampleProvider
     public void ReAnchorToCapture()
     {
         var (writeFrame, oldestFrame) = _buffer.GetSnapshot();
-        var newReadFrame = Math.Max(oldestFrame, writeFrame - _currentTargetLagFrames);
+        var currentReadFrame = Volatile.Read(ref _readFrame);
+
+        // Never move the reader backward. If the writer has only just resumed after a
+        // stall, there may not be enough new history to fill the target lag yet; the
+        // reader must wait rather than replay audio that was already played.
+        var newReadFrame = Math.Max(
+            currentReadFrame,
+            Math.Max(oldestFrame, writeFrame - _currentTargetLagFrames));
         Volatile.Write(ref _readFrame, newReadFrame);
         _pendingShedFrames = 0;
         _pendingInsertFrames = 0;
@@ -103,8 +111,30 @@ public sealed class JitterBufferSampleProvider : ISampleProvider
 
     public WaveFormat WaveFormat { get; }
 
-    /// <summary>The configured jitter-buffer lag in milliseconds (profile base latency).</summary>
-    public int BaseLatencyMilliseconds { get; }
+    /// <summary>
+    /// Effective shared jitter-buffer lag in milliseconds. The routing engine keeps
+    /// this equal across destinations (it is raised to the most robust active profile
+    /// when a fallback occurs) so a profile change never silently desynchronizes one
+    /// speaker from the rest.
+    /// </summary>
+    public int BaseLatencyMilliseconds => Volatile.Read(ref _baseLatencyMilliseconds);
+
+    /// <summary>
+    /// Changes the shared base latency. Increasing it makes the reader pause until
+    /// the writer has built up the additional history; decreasing it re-anchors to
+    /// the new target. The engine only raises this value during a fallback.
+    /// </summary>
+    public void SetBaseLatencyMilliseconds(int baseLatencyMilliseconds)
+    {
+        if (baseLatencyMilliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(baseLatencyMilliseconds));
+        }
+
+        var frames = (long)Math.Round(_buffer.SampleRate * baseLatencyMilliseconds / 1000.0);
+        Volatile.Write(ref _baseLatencyMilliseconds, baseLatencyMilliseconds);
+        Volatile.Write(ref _baseLatencyFrames, frames);
+    }
 
     /// <summary>Configured drift-correction half window in milliseconds.</summary>
     public double DriftWindowMilliseconds => _maxDriftFrames * 1000.0 / _buffer.SampleRate;
@@ -251,6 +281,14 @@ public sealed class JitterBufferSampleProvider : ISampleProvider
         // reader continues from its current position to avoid skipping real audio.
         if (_inUnderrun && _silenceRunFrames > _buffer.SampleRate / 2)
         {
+            // If capture itself stalled (rather than writing silence), there may not
+            // be enough new history yet. Wait for it instead of replaying old audio.
+            if (writeFrame - _readFrame < _currentTargetLagFrames)
+            {
+                FillSilence(buffer, offset, samplesRequested);
+                return samplesRequested;
+            }
+
             ReAnchorToCapture();
             lag = writeFrame - _readFrame;
             if (lag <= 0)
@@ -403,7 +441,7 @@ public sealed class JitterBufferSampleProvider : ISampleProvider
     }
 
     private long TargetLagFrames =>
-        _baseLatencyFrames +
+        Volatile.Read(ref _baseLatencyFrames) +
         (long)Math.Round(_buffer.SampleRate * DelayMilliseconds / 1000.0);
 
     private static void FillSilence(float[] buffer, int offset, int count)
